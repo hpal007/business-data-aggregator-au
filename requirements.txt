@@ -1,0 +1,8 @@
+python-decouple
+apache-airflow-providers-apache-spark==5.3.3
+requests
+pandas
+
+# Packages required by the Airflow worker image
+pyspark==4.0.1
+psycopg2-binary

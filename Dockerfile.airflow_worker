@@ -1,0 +1,42 @@
+FROM apache/airflow:3.1.1-python3.10
+
+# Become root only for OS-level packages
+USER root
+
+# Install Java 17 and basic tools
+RUN apt-get update --allow-releaseinfo-change && \
+    apt-get install -y --no-install-recommends \
+        openjdk-17-jre-headless \
+        curl \
+        ca-certificates \
+        gnupg2 \
+        software-properties-common \
+        procps && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Detect and set JAVA_HOME dynamically
+RUN JAVA_PATH=$(dirname $(dirname $(readlink -f $(which java)))) && \
+    echo "export JAVA_HOME=$JAVA_PATH" >> /etc/profile.d/java.sh && \
+    echo "export PATH=\$JAVA_HOME/bin:\$PATH" >> /etc/profile.d/java.sh && \
+    echo "Detected JAVA_HOME=$JAVA_PATH" && \
+    echo "JAVA_HOME=$JAVA_PATH" >> /etc/environment
+
+# Set environment variables for future layers
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+
+COPY requirements.txt /opt/airflow/requirements.txt
+RUN chown airflow: /opt/airflow/requirements.txt || true
+
+# Switch back to airflow user for Python-level package installation
+USER airflow
+
+# Install Python dependencies from requirements.txt
+RUN pip install --no-cache-dir -r /opt/airflow/requirements.txt
+
+# Prepare Spark apps folder
+USER root
+# RUN mkdir -p /opt/airflow/spark_apps && chown -R airflow: /opt/airflow
+USER airflow
+WORKDIR /opt/airflow

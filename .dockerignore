@@ -1,0 +1,32 @@
+# Exclude VCS and editor metadata
+.git
+.gitignore
+.DS_Store
+.vscode/
+.idea/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtualenvs
+venv/
+.venv/
+env/
+
+# Logs and runtime files (mounted in compose, don't include in image context)
+logs/
+*.log
+*.sqlite
+
+# Docker and environment files (keep examples only)
+.env
+docker-compose.override.yml
+
+# OS files
+Thumbs.db
