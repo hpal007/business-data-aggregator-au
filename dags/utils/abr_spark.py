@@ -1,18 +1,22 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType, StructField, StringType, LongType
-from pyspark.sql.functions import to_date, year, month, coalesce, lit
+from pyspark.sql.types import StructType, StructField, StringType
 import xml.etree.ElementTree as ET
 
-# Global Spark session
-_spark = None
-
+# global Spark session variable
+spark = None
 
 def get_spark_session(app_name="ABR_Processor"):
     """Get or create a Spark session."""
-    global _spark
-    if _spark is None:
-        _spark = SparkSession.builder.master("local[*]").appName(app_name).getOrCreate()
-    return _spark
+    global spark
+    if spark is None:
+        spark = SparkSession.builder.master("local[*]").appName(app_name).getOrCreate()
+    return spark
+
+def stop_spark():
+    """Stop the Spark session if it exists."""
+    global spark
+    if spark is not None:
+        spark.stop()
 
 
 # Define schema to be used across tasks
@@ -28,14 +32,6 @@ ABR_SCHEMA = StructType(
         StructField("entity_postcode", StringType(), True),
     ]
 )
-
-
-def stop_spark():
-    """Stop the Spark session if it exists."""
-    global _spark
-    if _spark is not None:
-        _spark.stop()
-        _spark = None
 
 
 def safe_get(elem, path, attr=None):
@@ -75,16 +71,3 @@ def parse_abn_xml_iterative(file_path, batch_size=50000):
                 batch = []
     if batch:
         yield batch
-
-
-def process_active_records(df):
-    """Process active ABR records with standard transformations."""
-    return (
-        df.filter(df["abn_status"] == "ACT")
-        .withColumn("abn_start_date", to_date("abn_start_date", "yyyyMMdd"))
-        .withColumn("year", year("abn_start_date"))
-        .withColumn("month", month("abn_start_date"))
-        .withColumn("abn", df["abn"].cast(LongType()))
-        .withColumn("entity_state", coalesce("entity_state", lit("unknown")))
-        .orderBy("abn", "entity_name", "entity_state")
-    )

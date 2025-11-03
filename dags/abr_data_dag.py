@@ -1,9 +1,12 @@
-from airflow.decorators import dag, task
-from pyspark.sql.types import StructType, StructField, StringType, LongType
-from pyspark.sql.functions import to_date, year, month, coalesce, lit
-from datetime import datetime
+import requests
 import os
+import zipfile
+from airflow.decorators import dag, task
+from datetime import datetime
 import time
+# from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
+from pyspark.sql.types import LongType
+from pyspark.sql.functions import to_date, year, month, coalesce, lit
 
 from utils.abr_spark import (
     get_spark_session,
@@ -12,22 +15,54 @@ from utils.abr_spark import (
     parse_abn_xml_iterative,
 )
 
+
 BASE_DIR = "/opt/shared-data"
 DATA_DIR = os.path.join(BASE_DIR, "abr_xml_data")
 PARQUET_DIR = os.path.join(BASE_DIR, "parquet_output")
 
 
+# https://data.gov.au/data/dataset/activity/abn-bulk-extract
+URLS = [
+    "https://data.gov.au/data/dataset/5bd7fcab-e315-42cb-8daf-50b7efc2027e/resource/0ae4d427-6fa8-4d40-8e76-c6909b5a071b/download/public_split_1_10.zip",
+    "https://data.gov.au/data/dataset/5bd7fcab-e315-42cb-8daf-50b7efc2027e/resource/635fcb95-7864-4509-9fa7-a62a6e32b62d/download/public_split_11_20.zip",
+]
+
+
 @dag(
-    dag_id="old_process_abn_xml_files",
+    dag_id="ABR_DATA_DAG",
     start_date=datetime(2025, 11, 1),
     schedule=None,
     catchup=False,
-    tags=["abr", "spark", "xml", "parquet"],
+    tags=["abr", "download", "unzip"],
 )
-
-def process_abn_xml_files_dag():
+def download_and_unzip_dag():
+    
     @task
-    def process_xml_files():
+    def download_files():
+        os.makedirs(DATA_DIR, exist_ok=True)
+        file_paths = []
+        for url in URLS:
+            filename = os.path.join(DATA_DIR, url.split("/")[-1])
+            print(f"Downloading {url} → {filename}")
+            response = requests.get(url)
+            response.raise_for_status()
+            with open(filename, "wb") as f:
+                f.write(response.content)
+            file_paths.append(filename)
+        return file_paths
+
+    @task
+    def unzip_and_delete(file_paths: list):
+        for file_path in file_paths:
+            print(f"Unzipping {file_path}")
+            with zipfile.ZipFile(file_path, "r") as zip_ref:
+                zip_ref.extractall(DATA_DIR)
+            print(f"Deleting {file_path}")
+            os.remove(file_path)
+        print(f"All files extracted and cleaned up in {DATA_DIR}")
+
+    @task
+    def process_xml_to_parquet():
         batch_size = 100000
         # Ensure output dir exists
         os.makedirs(PARQUET_DIR, exist_ok=True)
@@ -67,7 +102,7 @@ def process_abn_xml_files_dag():
         print("✅ All XML files processed successfully")
 
     @task
-    def process_parquet_files():
+    def process_parquet_to_table():
         # Get Spark session
         spark = get_spark_session("ABN_Parquet_Processor")
 
@@ -98,13 +133,14 @@ def process_abn_xml_files_dag():
         stop_spark()
         print("✅ Spark session stopped successfully")
 
-    # Set up task dependencies
-    process_xml = process_xml_files()
-    process_parquet = process_parquet_files()
+    downloaded_files = download_files()
+    unzip_task = unzip_and_delete(downloaded_files)
+    process_xml_to_parquet = process_xml_to_parquet()
+    create_abr_table = process_parquet_to_table()
     cleanup_task = cleanup()
+    
+    # Set task dependencies
+    unzip_task >> process_xml_to_parquet >> create_abr_table >> cleanup_task
 
-    # Set the task dependencies
-    process_xml >> process_parquet >> cleanup_task
 
-
-dag = process_abn_xml_files_dag()
+dag = download_and_unzip_dag()

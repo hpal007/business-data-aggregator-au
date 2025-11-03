@@ -9,24 +9,12 @@ with DAG(
     catchup=False,
     tags=["abr", "test", "spark", "postgres"],
 ) as dag:
-    # spark_to_db = SparkSubmitOperator(
-    #     task_id="spark_write_to_target_db",
-    #     conn_id="spark_default",
-    #     application="/opt/airflow/spark_apps/test_spark_target_db_job.py",
-    #     conf={"spark.master": "spark://spark-master:7077"},
-    #     jars="/opt/spark/jars/postgresql-42.6.0.jar",  # ensure JDBC jar path matches your mount
-    # )
-
-    spark_write_to_target_db = SparkSubmitOperator(
+    spark_to_db = SparkSubmitOperator(
         task_id="spark_write_to_target_db",
-        application="/opt/airflow/dags/utils/test_spark_target_db_job.py",
         conn_id="spark_default",
-        jars="/opt/spark/jars/postgresql-42.6.0.jar",
-        conf={
-            "spark.master": "spark://spark-master:7077",
-            "spark.driver.extraClassPath": "/opt/spark/jars/postgresql-42.6.0.jar",
-            "spark.executor.extraClassPath": "/opt/spark/jars/postgresql-42.6.0.jar",
-        },
+        application="/opt/airflow/dags/utils/test_spark_target_db_job.py",
+        # conf={"spark.master": "spark://spark-master:7077"},
+        jars="/opt/spark/jars/postgresql-42.6.0.jar",  # ensure JDBC jar path matches your mount
     )
 
-    spark_write_to_target_db
+    spark_to_db

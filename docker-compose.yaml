@@ -93,41 +93,41 @@ services:
     networks:
       - airflow_spark_net
 
-  spark-master:
-    image: apache/spark:4.0.1-java21-python3
-    container_name: spark-master
-    hostname: spark-master
-    command: >
-      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
-      --host spark-master --port 7077 --webui-port 8081
-    ports:
-      - "7077:7077"   # Spark master port
-      - "8081:8081"   # Spark master web UI
-    environment:
-      - SPARK_NO_DAEMONIZE=true
-    volumes:
-      - ./shared-data-volume:/opt/shared-data
-    networks:
-      - airflow_spark_net
+  # spark-master:
+  #   image: apache/spark:4.0.1-java21-python3
+  #   container_name: spark-master
+  #   hostname: spark-master
+  #   command: >
+  #     /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+  #     --host spark-master --port 7077 --webui-port 8081
+  #   ports:
+  #     - "7077:7077"   # Spark master port
+  #     - "8081:8081"   # Spark master web UI
+  #   environment:
+  #     - SPARK_NO_DAEMONIZE=true
+  #   volumes:
+  #     - ./shared-data-volume:/opt/shared-data
+  #   networks:
+  #     - airflow_spark_net
 
-  spark-worker:
-    image: apache/spark:4.0.1-java21-python3
-    container_name: spark-worker
-    hostname: spark-worker
-    command: >
-      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
-      spark://spark-master:7077
-      --webui-port 8082
-    environment:
-      - SPARK_WORKER_CORES=1
-      - SPARK_WORKER_MEMORY=2g
-      - SPARK_NO_DAEMONIZE=true
-    depends_on:
-      - spark-master
-    volumes:
-      - ./shared-data-volume:/opt/shared-data
-    networks:
-      - airflow_spark_net
+  # spark-worker:
+  #   image: apache/spark:4.0.1-java21-python3
+  #   container_name: spark-worker
+  #   hostname: spark-worker
+  #   command: >
+  #     /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+  #     spark://spark-master:7077
+  #     --webui-port 8082
+  #   environment:
+  #     - SPARK_WORKER_CORES=1
+  #     - SPARK_WORKER_MEMORY=2g
+  #     - SPARK_NO_DAEMONIZE=true
+  #   depends_on:
+  #     - spark-master
+  #   volumes:
+  #     - ./shared-data-volume:/opt/shared-data
+  #   networks:
+  #     - airflow_spark_net
 
 
   airflow-apiserver:
@@ -195,8 +195,8 @@ services:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
-      spark-master:
-        condition: service_started
+      # spark-master:
+      #   condition: service_started
     environment:
       <<: *airflow-common-env
       DUMB_INIT_SETSID: "0"
@@ -255,12 +255,12 @@ services:
 
         echo "🔗 Creating Airflow connections (idempotent)..."
 
-        # Spark connection
-        /entrypoint airflow connections add 'spark_default' \
-          --conn-type 'spark' \
-          --conn-host 'spark://spark-master' \
-          --conn-port '7077' \
-          || echo "spark_default already exists."
+        # # Spark connection
+        # /entrypoint airflow connections add 'spark_default' \
+        #   --conn-type 'spark' \
+        #   --conn-host 'spark://spark-master' \
+        #   --conn-port '7077' \
+        #   || echo "spark_default already exists."
 
         # Target Postgres connection
         /entrypoint airflow connections add 'target_postgres' \
