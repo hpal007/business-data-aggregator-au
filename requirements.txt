@@ -6,3 +6,6 @@ pandas
 # Packages required by the Airflow worker image
 pyspark==4.0.1
 psycopg2-binary
+duckdb
+warcio
+pyarrow

@@ -4,7 +4,7 @@ import zipfile
 from airflow.decorators import dag, task
 from datetime import datetime
 import time
-# from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
+
 from pyspark.sql.types import LongType
 from pyspark.sql.functions import to_date, year, month, coalesce, lit
 
@@ -15,11 +15,9 @@ from utils.abr_spark import (
     parse_abn_xml_iterative,
 )
 
-
 BASE_DIR = "/opt/shared-data"
 DATA_DIR = os.path.join(BASE_DIR, "abr_xml_data")
 PARQUET_DIR = os.path.join(BASE_DIR, "parquet_output")
-
 
 # https://data.gov.au/data/dataset/activity/abn-bulk-extract
 URLS = [
@@ -33,10 +31,9 @@ URLS = [
     start_date=datetime(2025, 11, 1),
     schedule=None,
     catchup=False,
-    tags=["abr", "download", "unzip"],
+    tags=["abr"],
 )
 def download_and_unzip_dag():
-    
     @task
     def download_files():
         os.makedirs(DATA_DIR, exist_ok=True)
@@ -138,7 +135,7 @@ def download_and_unzip_dag():
     process_xml_to_parquet = process_xml_to_parquet()
     create_abr_table = process_parquet_to_table()
     cleanup_task = cleanup()
-    
+
     # Set task dependencies
     unzip_task >> process_xml_to_parquet >> create_abr_table >> cleanup_task
 
