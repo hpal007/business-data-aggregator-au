@@ -98,7 +98,6 @@ def fetch_page_from_cc(record, myagent=USER_AGENT):
         offset = int(record["warc_record_offset"])
         length = int(record["warc_record_length"])
         filename = record["warc_filename"]
-        url = record.get("url", "unknown")
         s3_url = f"https://data.commoncrawl.org/{filename}"
 
         byte_range = f"bytes={offset}-{offset + length - 1}"
@@ -530,12 +529,12 @@ def process_single_record_wrapper(
 
 
 @dag(
-    dag_id="cc_business_info_extraction_single",
+    dag_id="AU_CC_DATA_WARC_DAG",
     description="Extract business information from Common Crawl files",
     schedule=None,
     start_date=datetime(2025, 11, 1),
     catchup=False,
-    tags=["abr", "cc"],
+    tags=["au", "cc"],
     default_args={
         "owner": "airflow",
         "retries": 1,
@@ -681,6 +680,7 @@ def cc_business_info_extraction_single_dag():
             "status": "completed",
         }
 
+    # Set task dependencies
     process_specific_batch()
 
 

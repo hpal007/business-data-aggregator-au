@@ -27,11 +27,11 @@ URLS = [
 
 
 @dag(
-    dag_id="ABR_DATA_DAG",
+    dag_id="AU_ABR_DATA_DAG",
     start_date=datetime(2025, 11, 1),
     schedule=None,
     catchup=False,
-    tags=["abr"],
+    tags=["au", "abr"],
 )
 def download_and_unzip_dag():
     @task

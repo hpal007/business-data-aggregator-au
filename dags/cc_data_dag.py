@@ -21,11 +21,11 @@ logger = logging.getLogger(__name__)
 
 
 @dag(
-    dag_id="CC_DATA_DAG",
+    dag_id="AU_CC_DATA_DAG",
     start_date=datetime(2025, 11, 1),
     schedule=None,
     catchup=False,
-    tags=["abr"],
+    tags=["au", "abr"],
 )
 def cc_data_dag():
     @task
@@ -144,10 +144,9 @@ def cc_data_dag():
         logger.info(f"Number of split files created {len(split_files)}")
         return split_files
 
+    # Set task dependencies
     parquet_files_list = get_parquet_files()
-    split_output = (
-        process_files_with_duckdb(parquet_files_list) >> split_parquet_files()
-    )
+    process_files_with_duckdb(parquet_files_list) >> split_parquet_files()
 
 
 dag = cc_data_dag()
