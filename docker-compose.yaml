@@ -21,7 +21,6 @@ x-airflow-common:
     # WARNING: Use _PIP_ADDITIONAL_REQUIREMENTS option ONLY for a quick checks
     # for other purpose (development, test and especially production usage) build/extend Airflow image.
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
-    # The following line can be used to set a custom config file, stored in the local config folder
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
  
   volumes:
@@ -93,43 +92,6 @@ services:
     networks:
       - airflow_spark_net
 
-  # spark-master:
-  #   image: apache/spark:4.0.1-java21-python3
-  #   container_name: spark-master
-  #   hostname: spark-master
-  #   command: >
-  #     /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
-  #     --host spark-master --port 7077 --webui-port 8081
-  #   ports:
-  #     - "7077:7077"   # Spark master port
-  #     - "8081:8081"   # Spark master web UI
-  #   environment:
-  #     - SPARK_NO_DAEMONIZE=true
-  #   volumes:
-  #     - ./shared-data-volume:/opt/shared-data
-  #   networks:
-  #     - airflow_spark_net
-
-  # spark-worker:
-  #   image: apache/spark:4.0.1-java21-python3
-  #   container_name: spark-worker
-  #   hostname: spark-worker
-  #   command: >
-  #     /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
-  #     spark://spark-master:7077
-  #     --webui-port 8082
-  #   environment:
-  #     - SPARK_WORKER_CORES=1
-  #     - SPARK_WORKER_MEMORY=2g
-  #     - SPARK_NO_DAEMONIZE=true
-  #   depends_on:
-  #     - spark-master
-  #   volumes:
-  #     - ./shared-data-volume:/opt/shared-data
-  #   networks:
-  #     - airflow_spark_net
-
-
   airflow-apiserver:
     <<: *airflow-common
     container_name: airflow-apiserver
@@ -189,6 +151,14 @@ services:
     image: my-airflow-worker:3.1.1
     command: celery worker
     restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '5.0'      # Adjust based on your host
+          memory: 6G       # Increase if you have more RAM
+        reservations:
+          cpus: '1.0'
+          memory: 2G
     depends_on:
       <<: *airflow-common-depends-on
       airflow-apiserver:
