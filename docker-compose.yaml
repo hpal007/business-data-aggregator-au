@@ -155,7 +155,7 @@ services:
       resources:
         limits:
           cpus: '5.0'      # Adjust based on your host
-          memory: 6G       # Increase if you have more RAM
+          memory: 6G       # Increase if more RAM
         reservations:
           cpus: '1.0'
           memory: 2G
