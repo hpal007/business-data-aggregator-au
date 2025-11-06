@@ -1,23 +1,18 @@
 from airflow.decorators import dag, task
 from datetime import datetime, timedelta
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, length
-from pyspark.sql.types import StringType
 import requests
 import json
 import re
 import os
-import pyarrow.parquet as pq
 from bs4 import BeautifulSoup
 from warcio.archiveiterator import ArchiveIterator
 from pathlib import Path
 
 
-BASE_DIR = "/opt/shared-data"
-INPUT_DIR = Path(os.path.join(BASE_DIR, "cc_index_data"))
+BASE_DIR = "/opt/shared-data/cc/"
 OUTPUT_DIR = Path(os.path.join(BASE_DIR, "cc_processed_data"))
-SPLIT_DIR = Path(os.path.join(BASE_DIR, "cc_split_data"))
-CLEANED_URL_DIR = Path(os.path.join(BASE_DIR, "cc_cleaned_data"))
+INPUT_DIR = Path(os.path.join(BASE_DIR, "cc_split_data"))
 USER_AGENT = "cc-get-started/1.0 (Example data retrieval script; yourname@example.com)"
 
 # === Regex Definitions ===
@@ -154,6 +149,12 @@ def extract_business_info_from_soup(soup):
     return results
 
 
+def process_single_record(record):
+    html = fetch_page_from_cc(record)
+    info = extract_business_info_from_soup(html)
+    return json.dumps(info, ensure_ascii=False)
+
+
 def process_single_record_py(record):
     """Helper to be used as Spark UDF to extract business info JSON string"""
     try:
@@ -161,12 +162,6 @@ def process_single_record_py(record):
         return info
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
-
-
-def process_single_record(record):
-    html = fetch_page_from_cc(record)
-    info = extract_business_info_from_soup(html)
-    return json.dumps(info, ensure_ascii=False)
 
 
 @dag(
@@ -184,113 +179,47 @@ def process_single_record(record):
 )
 def cc_business_info_extraction_single_dag():
     @task
-    def split_parquet_files():
-        os.makedirs(SPLIT_DIR, exist_ok=True)
-        split_files = []
-        for parquet_file in INPUT_DIR.glob("*.parquet"):
-            pf = pq.ParquetFile(str(parquet_file))
-            for rg in range(pf.num_row_groups):
-                table = pf.read_row_group(rg)
-                split_filename = f"{parquet_file.stem}_rg{rg}.parquet"
-                split_path = SPLIT_DIR / split_filename
-
-                # Remove existing file if it exists to replace
-                if split_path.exists():
-                    split_path.unlink()
-
-                pq.write_table(table, split_path)
-                split_files.append(str(split_path))
-        
-        print(f"Number of split files created {len(split_files)}")
-
-        return split_files
-
-    @task
-    def filter_info_urls(max_url_length: int = 80) -> str:
-        os.makedirs(CLEANED_URL_DIR, exist_ok=True)
+    def process_specific_batch() -> dict:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
         spark = SparkSession.builder.appName("CCBusinessInfoExtraction").getOrCreate()
 
-        parquet_files = list(SPLIT_DIR.glob("*.parquet"))
-        total_files = len(parquet_files)
-
-        for i, parquet_file in enumerate(parquet_files, start=1):
-            print(
-                f"Processing file {i}/{total_files}: {parquet_file} "
-                f"(remaining: {total_files - i})"
-            )
+        for parquet_file in Path(INPUT_DIR).glob("*.parquet"):
+            file_name = str(parquet_file).split("/")[-1]
+            print(f"Reading parquet file: {file_name}")
 
             df = spark.read.parquet(str(parquet_file))
+            total_records = df.count()
+            print(f"Total Records in file : {total_records}")
 
-            keywords = [
-                "contact",
-                "contact-us",
-                "about",
-                "about-us",
-                "privacy",
-                "privacy-policy",
-                "help",
-                "support",
-                "terms",
-                "company",
-                "services",
-            ]
-            segment_patterns = [f"(?:/|-){kw}(?:/|$|\\.html|\\.php)" for kw in keywords]
-            pattern = "(?i)(?:" + "|".join(segment_patterns) + ")"
+            # Collect all rows to driver since file is already small enough
+            rows = df.limit(10).collect()
 
-            df_filtered = df.filter(
-                (col("url").startswith("https:/"))
-                & (col("url").rlike(pattern))
-                & (length(col("url")) <= max_url_length)
-            ).dropDuplicates(["url"])
+            processed_rows = []
+            for row in rows:
+                record = row.asDict()
+                business_info = process_single_record(record)
+                record["business_info"] = business_info
+                processed_rows.append(record)
 
-            parquet_filename = str(parquet_file).split("/")[-1]
-            parquet_path = f"{CLEANED_URL_DIR}/{parquet_filename}"
+            processed_df = spark.createDataFrame(processed_rows)
 
-            df_filtered.write.mode("overwrite").parquet(parquet_path)
+            output_path = f"{OUTPUT_DIR}/{file_name}"
 
-            print(f"Filtered data saved to: {parquet_path}")
+            processed_df.write.mode("overwrite").parquet(output_path)
+
+            print(f"Saved processed data to: {output_path}")
 
         spark.stop()
 
-    @task
-    def process_specific_batch() -> dict:
-        batch_file = "cc_au_filtered_part-00019-cd290efe-3ad3-4dd9-9ee4-2edabbb0d248.c000.gz_rg0.parquet"
-        input_path = f"{CLEANED_URL_DIR}/{batch_file}"
-        output_path = f"{OUTPUT_DIR}/processed_{batch_file}"
+        print(
+            {
+                "input_file": str(parquet_file),
+                "output_file": output_path,
+                "records_processed": total_records,
+            }
+        )
 
-        print(f"Reading parquet file: {input_path}")
-
-        spark = SparkSession.builder.appName("CCBusinessInfoExtraction").getOrCreate()
-
-        df = spark.read.parquet(input_path)
-        total_records = df.count()
-        print(f"Total Records in file : {total_records}")
-
-        # Collect all rows to driver since file is already small enough
-        rows = df.limit(10).collect()
-
-        processed_rows = []
-        for row in rows:
-            record = row.asDict()
-            business_info = process_single_record(record)
-            record["business_info"] = business_info
-            processed_rows.append(record)
-
-        processed_df = spark.createDataFrame(processed_rows)
-
-        processed_df.write.mode("overwrite").parquet(output_path)
-
-        print(f"Saved processed data to: {output_path}")
-
-        spark.stop()
-
-        return {
-            "batch_file": batch_file,
-            "output_file": output_path,
-            "records_processed": total_records,
-        }
-
-    split_parquet_files() >> filter_info_urls() >> process_specific_batch()
+    process_specific_batch()
 
 
 single_dag_instance = cc_business_info_extraction_single_dag()
