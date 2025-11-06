@@ -27,7 +27,7 @@ MAX_WORKERS = 10  # Number of parallel threads for fetching pages
 USE_SPARK_DISTRIBUTED = False  # Set to True only if processing 1000+ records #TODO need to make changes not working currently.
 
 # Batch size per file
-BATCH_SIZE = 100  # Process 100 records at a time, set to None for all records
+BATCH_SIZE = 1000  # Process 100 records at a time, set to None for all records
 
 
 # === Improved Regex Definitions ===
@@ -534,7 +534,7 @@ def process_single_record_wrapper(
     schedule=None,
     start_date=datetime(2025, 11, 1),
     catchup=False,
-    tags=["au", "cc"],
+    tags=["au", "cc", "abr"],
     default_args={
         "owner": "airflow",
         "retries": 1,
