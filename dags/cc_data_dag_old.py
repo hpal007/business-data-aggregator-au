@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 @dag(
-    dag_id="AU_CC_DATA_DAG",
+    dag_id="AU_CC_DATA_DAG_OLD",
     start_date=datetime(2025, 11, 1),
     schedule=None,
     catchup=False,

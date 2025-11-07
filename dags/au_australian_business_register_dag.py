@@ -2,6 +2,7 @@ import requests
 from pyspark.sql import SparkSession
 import os
 import zipfile
+import logging
 from airflow.decorators import dag, task
 from datetime import datetime
 import time
@@ -13,6 +14,10 @@ from utils.abr_spark import (
     ABR_SCHEMA,
     parse_abn_xml_iterative,
 )
+
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 BASE_DIR = "/opt/shared-data"
 DATA_DIR = os.path.join(BASE_DIR, "abr_xml_data")
@@ -43,7 +48,7 @@ spark = spark = (
 
 
 @dag(
-    dag_id="AU_ABR_DATA_DAG",
+    dag_id="AU_Australian_Business_Register_DAG",
     start_date=datetime(2025, 11, 1),
     schedule=None,
     catchup=False,
@@ -56,7 +61,7 @@ def download_and_unzip_dag():
         file_paths = []
         for url in URLS:
             filename = os.path.join(DATA_DIR, url.split("/")[-1])
-            print(f"Downloading {url} → {filename}")
+            logger.info(f"Downloading {url} → {filename}")
             response = requests.get(url)
             response.raise_for_status()
             with open(filename, "wb") as f:
@@ -67,12 +72,12 @@ def download_and_unzip_dag():
     @task
     def unzip_and_delete(file_paths: list):
         for file_path in file_paths:
-            print(f"Unzipping {file_path}")
+            logger.info(f"Unzipping {file_path}")
             with zipfile.ZipFile(file_path, "r") as zip_ref:
                 zip_ref.extractall(DATA_DIR)
-            print(f"Deleting {file_path}")
+            logger.info(f"Deleting {file_path}")
             os.remove(file_path)
-        print(f"All files extracted and cleaned up in {DATA_DIR}")
+        logger.info(f"All files extracted and cleaned up in {DATA_DIR}")
 
     @task
     def process_xml_to_parquet():
@@ -86,30 +91,30 @@ def download_and_unzip_dag():
 
         for xml_file in xml_files:
             file_path = os.path.join(DATA_DIR, xml_file)
-            print(f"Processing: {file_path}")
+            logger.info(f"Processing: {file_path}")
             start_time = time.time()
 
             df = spark.createDataFrame([], schema=ABR_SCHEMA)
             batch_num = 0
-            print("Processing batch with batch_size of", batch_size)
+            logger.info("Processing batch with batch_size of", batch_size)
             for batch in parse_abn_xml_iterative(file_path, batch_size=batch_size):
                 batch_df = spark.createDataFrame(batch, schema=ABR_SCHEMA)
                 df = df.union(batch_df)
                 batch_num += 1
 
-                print(f"{batch_num} ->", end=" ")
+                logger.info(f"{batch_num} ->", end=" ")
 
             count = df.count()
-            print(f"Total records in {xml_file}: {count}")
+            logger.info(f"Total records in {xml_file}: {count}")
             parquet_path = os.path.join(
                 PARQUET_DIR, f"{xml_file.replace('.xml', '.parquet')}"
             )
             df.write.mode("overwrite").parquet(parquet_path)
 
-            print(f"Saved → {parquet_path}")
-            print(f"Time taken: {time.time() - start_time:.2f}s")
+            logger.info(f"Saved → {parquet_path}")
+            logger.info(f"Time taken: {time.time() - start_time:.2f}s")
 
-        print("✅ All XML files processed successfully")
+        logger.info("✅ All XML files processed successfully")
 
     @task
     def process_parquet_to_table():
@@ -132,13 +137,13 @@ def download_and_unzip_dag():
             output_path
         )
 
-        print("✅ Parquet files processed and partitioned successfully")
+        logger.info("✅ Parquet files processed and partitioned successfully")
 
         return output_path
 
     @task
     def load_table(parquet_path, table_name):
-        print(f"parquet_path: {parquet_path} and table :{table_name} ")
+        logger.info(f"parquet_path: {parquet_path} and table :{table_name} ")
 
         df = spark.read.parquet(parquet_path)
 
@@ -153,7 +158,7 @@ def download_and_unzip_dag():
     def cleanup():
         """Clean up resources after all tasks are complete."""
         spark.stop()
-        print("✅ Spark session stopped successfully")
+        logger.info("✅ Spark session stopped successfully")
 
     downloaded_files = download_files()
     unzip_task = unzip_and_delete(downloaded_files)
