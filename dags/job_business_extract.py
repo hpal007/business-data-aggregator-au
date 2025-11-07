@@ -438,6 +438,31 @@ def extract_business_info_from_soup(soup, error_info=None):
     return results
 
 
+def extract_json_fields(business_info_json_str):
+    if business_info_json_str is None:
+        return None, None, None
+    try:
+        data = json.loads(business_info_json_str)
+        ABN = (
+            data["ABN"][0]["matched_text"]
+            if data.get("ABN") and len(data["ABN"]) > 0
+            else None
+        )
+        ACN = (
+            data["ACN"][0]["matched_text"]
+            if data.get("ACN") and len(data["ACN"]) > 0
+            else None
+        )
+        CompanyName = (
+            data["CompanyName"][0]["matched_text"]
+            if data.get("CompanyName") and len(data["CompanyName"]) > 0
+            else None
+        )
+        return ABN, ACN, CompanyName
+    except Exception:
+        return None, None, None
+
+
 def process_partition(iterator):
     """
     Process a partition of records. This function is serializable and will be
@@ -455,7 +480,8 @@ def process_partition(iterator):
 
             soup, error_info = fetch_page_from_cc(record)
             info = extract_business_info_from_soup(soup, error_info)
-            business_info_json = json.dumps(info, ensure_ascii=False)
+            business_info = json.dumps(info, ensure_ascii=False)
+            ABN, ACN, CompanyName = extract_json_fields(business_info)
 
             # Yield all original columns plus business_info
             yield (
@@ -468,7 +494,10 @@ def process_partition(iterator):
                 row.warc_filename,
                 row.warc_record_offset,
                 row.warc_record_length,
-                business_info_json,
+                ABN,
+                ACN,
+                CompanyName,
+                business_info,
             )
         except Exception as e:
             error_json = json.dumps(
