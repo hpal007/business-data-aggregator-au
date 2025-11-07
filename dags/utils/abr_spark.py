@@ -5,12 +5,21 @@ import xml.etree.ElementTree as ET
 # global Spark session variable
 spark = None
 
+
 def get_spark_session(app_name="ABR_Processor"):
     """Get or create a Spark session."""
     global spark
     if spark is None:
-        spark = SparkSession.builder.master("local[*]").appName(app_name).getOrCreate()
+        spark = (
+            SparkSession.builder.appName("CCBusinessInfoExtraction")
+            .config("spark.driver.memory", "1g")
+            .config("spark.sql.shuffle.partitions", "4")
+            .config("spark.driver.maxResultSize", "512m")
+            .getOrCreate()
+        )
+        spark.sparkContext.setLogLevel("ERROR")
     return spark
+
 
 def stop_spark():
     """Stop the Spark session if it exists."""

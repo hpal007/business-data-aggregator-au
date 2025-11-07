@@ -1,4 +1,5 @@
 import requests
+from pyspark.sql import SparkSession
 import os
 import zipfile
 from airflow.decorators import dag, task
@@ -9,9 +10,7 @@ from pyspark.sql.types import LongType
 from pyspark.sql.functions import to_date, year, month, coalesce, lit
 
 from utils.abr_spark import (
-    get_spark_session,
     ABR_SCHEMA,
-    stop_spark,
     parse_abn_xml_iterative,
 )
 
@@ -19,11 +18,28 @@ BASE_DIR = "/opt/shared-data"
 DATA_DIR = os.path.join(BASE_DIR, "abr_xml_data")
 PARQUET_DIR = os.path.join(BASE_DIR, "parquet_output")
 
+POSTGRES_JDBC_URL = "jdbc:postgresql://target_postgres:5432/target_db"
+POSTGRES_PROPERTIES = {
+    "user": "spark_user",
+    "password": "spark_pass",
+    "driver": "org.postgresql.Driver",
+}
+
 # https://data.gov.au/data/dataset/activity/abn-bulk-extract
 URLS = [
     "https://data.gov.au/data/dataset/5bd7fcab-e315-42cb-8daf-50b7efc2027e/resource/0ae4d427-6fa8-4d40-8e76-c6909b5a071b/download/public_split_1_10.zip",
     "https://data.gov.au/data/dataset/5bd7fcab-e315-42cb-8daf-50b7efc2027e/resource/635fcb95-7864-4509-9fa7-a62a6e32b62d/download/public_split_11_20.zip",
 ]
+
+
+spark = spark = (
+    SparkSession.builder.appName("CCBusinessInfoExtraction")
+    .config("spark.driver.memory", "1g")
+    .config("spark.sql.shuffle.partitions", "4")
+    .config("spark.driver.maxResultSize", "512m")
+    .config("spark.jars.packages", "org.postgresql:postgresql:42.6.0")
+    .getOrCreate()
+)
 
 
 @dag(
@@ -64,9 +80,6 @@ def download_and_unzip_dag():
         # Ensure output dir exists
         os.makedirs(PARQUET_DIR, exist_ok=True)
 
-        # Get Spark session
-        spark = get_spark_session("ABN_XML_Processor")
-
         xml_files = [f for f in os.listdir(DATA_DIR) if f.endswith(".xml")]
         if not xml_files:
             raise FileNotFoundError(f"No XML files found in {DATA_DIR}")
@@ -100,9 +113,6 @@ def download_and_unzip_dag():
 
     @task
     def process_parquet_to_table():
-        # Get Spark session
-        spark = get_spark_session("ABN_Parquet_Processor")
-
         # Read parquet files
         df = spark.read.schema(ABR_SCHEMA).parquet(f"{PARQUET_DIR}/*.parquet")
 
@@ -124,20 +134,35 @@ def download_and_unzip_dag():
 
         print("✅ Parquet files processed and partitioned successfully")
 
+        return output_path
+
+    @task
+    def load_table(parquet_path, table_name):
+        print(f"parquet_path: {parquet_path} and table :{table_name} ")
+
+        df = spark.read.parquet(parquet_path)
+
+        df.write.format("jdbc").option("url", POSTGRES_JDBC_URL).option(
+            "dbtable", table_name
+        ).option("user", POSTGRES_PROPERTIES["user"]).option(
+            "password", POSTGRES_PROPERTIES["password"]
+        ).option("driver", POSTGRES_PROPERTIES["driver"]).mode("overwrite").save()
+        return f"{table_name} loaded"
+
     @task
     def cleanup():
         """Clean up resources after all tasks are complete."""
-        stop_spark()
+        spark.stop()
         print("✅ Spark session stopped successfully")
 
     downloaded_files = download_files()
     unzip_task = unzip_and_delete(downloaded_files)
     process_xml_to_parquet = process_xml_to_parquet()
     create_abr_table = process_parquet_to_table()
-    cleanup_task = cleanup()
+    abr_tbl = load_table(parquet_path=create_abr_table, table_name="abr_tbl")
 
     # Set task dependencies
-    unzip_task >> process_xml_to_parquet >> create_abr_table >> cleanup_task
+    unzip_task >> process_xml_to_parquet >> create_abr_table >> abr_tbl >> cleanup()
 
 
 dag = download_and_unzip_dag()
