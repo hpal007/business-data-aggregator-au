@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from warcio.archiveiterator import ArchiveIterator
 from pathlib import Path
 
-from utils.business_extract import process_partition
+from business_extract import process_partition
 
 
 BASE_DIR = "/opt/shared-data/cc/"
@@ -33,7 +33,7 @@ spark = spark = (
     .config("spark.driver.memory", "1g")
     .config("spark.sql.shuffle.partitions", "4")
     .config("spark.driver.maxResultSize", "512m")
-    .config("spark.submit.pyFiles", "/opt/airflow/dags/utils/business_extract.py")
+    .config("spark.submit.pyFiles", "/opt/airflow/dags/business_extract.py")
     .config("spark.jars.packages", "org.postgresql:postgresql:42.6.0")
     .getOrCreate()
 )
