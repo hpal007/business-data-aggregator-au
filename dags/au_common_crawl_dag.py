@@ -40,18 +40,43 @@ POSTGRES_PROPERTIES = {
 }
 
 # === Configuration ===
-BATCH_SIZE = 100  # Process records at a time, set to None for all records
+BATCH_SIZE = 500  # Process records at a time, set to None for all records
 
 
-spark = spark = (
-    SparkSession.builder.appName("CCBusinessInfoExtraction")
-    .config("spark.driver.memory", "1g")
-    .config("spark.sql.shuffle.partitions", "4")
-    .config("spark.driver.maxResultSize", "512m")
-    .config("spark.submit.pyFiles", "/opt/airflow/dags/job_business_extract.py")
-    .config("spark.jars.packages", "org.postgresql:postgresql:42.6.0")
-    .getOrCreate()
-)
+def get_spark_session(app_name: str = "cc"):
+    spark = (
+        SparkSession.builder.appName(app_name)
+        .master("local[7]")
+        .config("spark.driver.memory", "6g")
+        .config("spark.driver.cores", "6")
+        .config("spark.executor.memory", "6g")
+        .config("spark.executor.cores", "6")
+        .config("spark.sql.shuffle.partitions", "56")
+        .config("spark.driver.maxResultSize", "2g")
+        .config("spark.submit.pyFiles", "/opt/airflow/dags/job_business_extract.py")
+        .config("spark.jars.packages", "org.postgresql:postgresql:42.6.0")
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        .config("spark.sql.adaptive.skewJoin.enabled", "true")
+        .config("spark.shuffle.compress", "true")
+        .config("spark.shuffle.spill.compress", "true")
+        .config("spark.io.compression.codec", "snappy")
+        .config("spark.broadcast.compress", "true")
+        .config("spark.rdd.compress", "true")
+        .config("spark.speculation", "true")
+        .config("spark.speculation.multiplier", "1.3")
+        .config("spark.speculation.quantile", "0.75")
+        .config("spark.network.timeout", "600s")
+        .config("spark.sql.files.maxPartitionBytes", "256mb")
+        .config("spark.sql.files.minPartitionNum", "8")
+        .config("spark.default.parallelism", "56")
+        .config("spark.task.maxFailures", "4")
+        .config("spark.executor.heartbeatInterval", "20s")
+        .config("spark.network.timeoutInterval", "600s")
+        .getOrCreate()
+    )
+
+    return spark
 
 
 @dag(
@@ -61,6 +86,7 @@ spark = spark = (
     start_date=datetime(2025, 11, 1),
     catchup=False,
     tags=["au", "cc", "abr"],
+    max_active_tasks=1,
     default_args={
         "owner": "airflow",
         "retries": 1,
@@ -152,13 +178,13 @@ def cc_business_info_extraction_dag():
                     print(f"{idx + 1} > ", end="", flush=True)
             except Exception as e:
                 logger.error(
-                    f"\n❌ Error processing {relative_url}: {type(e).__name__}: {e}"
+                    f"\nError processing {relative_url}: {type(e).__name__}: {e}"
                 )
                 failed_count += 1
                 continue
 
-        print()  # Final newline
-        logger.info("🧾 Processing complete:")
+        logger.info("\n... ... ... ... ... ... ... ... ... ... ... ... ...")
+        logger.info("Processing complete:")
         logger.info(f"   Total files processed: {len(parquet_files)}")
         logger.info(f"   Files with AU data: {processed_count}")
         logger.info(f"   Failed files: {failed_count}")
@@ -168,57 +194,85 @@ def cc_business_info_extraction_dag():
 
     @task
     def split_parquet_files():
+        """
+        Two-level splitting:
+        1. First split: By row groups (existing)
+        2. Second split: If row count > 30,000, split further into chunks
+        """
         os.makedirs(SPLIT_DIR, exist_ok=True)
         split_files = []
+
+        MAX_ROWS_PER_FILE = 30000
+
         for parquet_file in Path(DATA_DIR).glob("*.parquet"):
             pf = pq.ParquetFile(str(parquet_file))
+
+            # First split: by row groups
             for rg in range(pf.num_row_groups):
                 table = pf.read_row_group(rg)
-                split_filename = f"{parquet_file.stem}_rg{rg}.parquet"
-                split_path = SPLIT_DIR / split_filename
-                if split_path.exists():
-                    split_path.unlink()
-                pq.write_table(table, split_path)
-                split_files.append(str(split_path))
-        logger.info(f"Number of split files created {len(split_files)}")
+                num_rows = len(table)
+
+                logger.info(f"Processing row group {rg} with {num_rows:,} rows")
+
+                # Check if needs second split
+                if num_rows > MAX_ROWS_PER_FILE:
+                    # Second split: divide into smaller chunks
+                    num_chunks = (num_rows + MAX_ROWS_PER_FILE - 1) // MAX_ROWS_PER_FILE
+                    logger.info(
+                        f"  Row group {rg} exceeds {MAX_ROWS_PER_FILE:,} rows. Splitting into {num_chunks} chunks"
+                    )
+
+                    for chunk_idx in range(num_chunks):
+                        start_row = chunk_idx * MAX_ROWS_PER_FILE
+                        end_row = min((chunk_idx + 1) * MAX_ROWS_PER_FILE, num_rows)
+
+                        # Extract chunk from table
+                        chunk_table = table.slice(start_row, end_row - start_row)
+                        chunk_rows = len(chunk_table)
+
+                        # Save chunk with unique name: filename_rg{X}_chunk{Y}.parquet
+                        split_filename = (
+                            f"{parquet_file.stem}_rg{rg}_chunk{chunk_idx}.parquet"
+                        )
+                        split_path = SPLIT_DIR / split_filename
+
+                        if split_path.exists():
+                            split_path.unlink()
+
+                        pq.write_table(chunk_table, split_path)
+                        split_files.append(str(split_path))
+                        logger.info(
+                            f"    Saved chunk {chunk_idx} ({chunk_rows:,} rows) -> {split_filename}"
+                        )
+                else:
+                    # No second split needed, save as-is
+                    split_filename = f"{parquet_file.stem}_rg{rg}.parquet"
+                    split_path = SPLIT_DIR / split_filename
+
+                    if split_path.exists():
+                        split_path.unlink()
+
+                    pq.write_table(table, split_path)
+                    split_files.append(str(split_path))
+                    logger.info(
+                        f"  Saved row group {rg} ({num_rows:,} rows) -> {split_filename}"
+                    )
+
+        logger.info(f"Total split files created: {len(split_files)}")
         return split_files
 
     @task
-    def process_with_spark_distributed() -> dict:
+    def process_single_file(file_path: str) -> str:
         """
-        Process all parquet files using Spark distributed processing with mapPartitions.
-        Processes each file completely in chunks before moving to the next file.
+        Process a single parquet file with progress monitoring.
+        Returns the output path.
         """
-
+        spark = get_spark_session(file_path)
         os.makedirs(OUTPUT_DIR, exist_ok=True)
+        parquet_file = Path(file_path)
+        file_name = parquet_file.name
+        file_start_time = time.time()
 
-        parquet_files = list(Path(SPLIT_DIR).glob("*.parquet"))
-        total_files = len(parquet_files)
-
-        print(f"\n{'=' * 60}")
-        print(f"Found {total_files} parquet files to process")
-        print(
-            "Processing mode: Spark Distributed (mapPartitions) with File-Level Chunking"
-        )
-        print(f"Chunk size: {BATCH_SIZE if BATCH_SIZE else 100} records")
-        print(f"{'=' * 60}\n")
-
-        total_processed = 0
-        total_error_stats = {
-            "timeout": 0,
-            "connection_error": 0,
-            "invalid_status": 0,
-            "empty_content": 0,
-            "empty_html": 0,
-            "no_response_record": 0,
-            "warc_parse_error": 0,
-            "invalid_record": 0,
-            "processing_error": 0,
-            "other_errors": 0,
-            "success": 0,
-        }
-
-        # Define output schema
         output_schema = StructType(
             [
                 StructField("url", StringType(), True),
@@ -237,216 +291,184 @@ def cc_business_info_extraction_dag():
             ]
         )
 
-        for file_idx, parquet_file in enumerate(parquet_files, 1):
-            file_name = parquet_file.name
-            print(f"[{file_idx}/{total_files}] Processing: {file_name}")
+        logger.info(f"\nProcessing: {file_name}")
+        logger.info(f"  Start time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-            try:
-                # Read parquet file
-                df = spark.read.parquet(str(parquet_file))
-                total_records = df.count()
-                print(f"  Total records: {total_records:,}")
+        try:
+            df = spark.read.parquet(str(parquet_file))
+            total_records = df.count()
+            logger.info(f"  Total records in file: {total_records:,}")
 
-                chunk_size = BATCH_SIZE if BATCH_SIZE else 100
-                num_chunks = (total_records + chunk_size - 1) // chunk_size
+            BATCH_RECORDS = 500
+            num_batches = (total_records + BATCH_RECORDS - 1) // BATCH_RECORDS
 
-                print(
-                    f"  Chunking strategy: {num_chunks} chunks of {chunk_size} records each"
+            logger.info(
+                f"  Processing in {num_batches} batches of {BATCH_RECORDS} records"
+            )
+            logger.info(f"  {'=' * 55}")
+
+            file_stats = {"success": 0, "errors": 0}
+            error_stats = {
+                "timeout": 0,
+                "connection_error": 0,
+                "invalid_status": 0,
+                "empty_content": 0,
+                "empty_html": 0,
+                "no_response_record": 0,
+                "warc_parse_error": 0,
+                "invalid_record": 0,
+                "processing_error": 0,
+                "other_errors": 0,
+                "success": 0,
+            }
+
+            batch_output_dir = (
+                f"{OUTPUT_DIR}/.batch_{Path(file_name).stem}_{int(time.time())}"
+            )
+            os.makedirs(batch_output_dir, exist_ok=True)
+
+            for batch_idx in range(num_batches):
+                batch_start = time.time()
+                offset = batch_idx * BATCH_RECORDS
+                batch_end = min(offset + BATCH_RECORDS, total_records)
+                actual_batch_size = batch_end - offset
+
+                batch_df = (
+                    df.limit(batch_end).subtract(df.limit(offset))
+                    if offset > 0
+                    else df.limit(BATCH_RECORDS)
                 )
-                print(f"  {'=' * 55}")
 
-                file_processed_count = 0
-                file_chunk_stats = {"success": 0, "errors": 0}
+                num_partitions = max(1, actual_batch_size // 50)
+                batch_df = batch_df.repartition(num_partitions)
 
-                # Collect all chunks first (write to temporary directory)
-                temp_chunk_dir = (
-                    f"{OUTPUT_DIR}/.temp_{Path(file_name).stem}_{int(time.time())}"
+                processed_rdd = batch_df.rdd.mapPartitions(process_partition)
+                processed_batch_df = spark.createDataFrame(
+                    processed_rdd, schema=output_schema
                 )
-                os.makedirs(temp_chunk_dir, exist_ok=True)
+                processed_batch_df.cache()
 
-                # Process each chunk sequentially
-                for chunk_idx in range(num_chunks):
-                    offset = chunk_idx * chunk_size
-                    chunk_end = min(offset + chunk_size, total_records)
-                    actual_chunk_size = chunk_end - offset
+                batch_count = processed_batch_df.count()
+                batch_elapsed = time.time() - batch_start
+                batch_rate = batch_count / batch_elapsed if batch_elapsed > 0 else 0
 
-                    print(
-                        f"  Chunk {chunk_idx + 1}/{num_chunks}: Processing records {offset:,} to {chunk_end:,} ({actual_chunk_size:,} records)..."
-                    )
+                batch_output_path = f"{batch_output_dir}/batch_{batch_idx:05d}.parquet"
+                processed_batch_df.write.mode("overwrite").parquet(batch_output_path)
 
+                elapsed_minutes = (time.time() - file_start_time) / 60
+                logger.info(
+                    f"  Batch {batch_idx + 1}/{num_batches}: "
+                    f"Records {offset:,}-{batch_end:,} | "
+                    f"Saved {batch_count:,} | "
+                    f"Rate: {batch_rate:.1f} rec/sec | "
+                    f"Elapsed: {elapsed_minutes:.1f}min"
+                )
+
+                business_info_rows = processed_batch_df.select(
+                    "business_info"
+                ).collect()
+                for row in business_info_rows:
                     try:
-                        # Use offset and limit for efficient chunking
-                        chunk_df = (
-                            df.limit(chunk_end).subtract(df.limit(offset))
-                            if offset > 0
-                            else df.limit(chunk_size)
-                        )
+                        info = json.loads(row.business_info)
+                        status = info.get("fetch_status", "success")
+                        if status == "success":
+                            file_stats["success"] += 1
+                            error_stats["success"] += 1
+                        elif status in error_stats:
+                            file_stats["errors"] += 1
+                            error_stats[status] += 1
+                        else:
+                            file_stats["errors"] += 1
+                            error_stats["other_errors"] += 1
+                    except Exception:
+                        file_stats["errors"] += 1
+                        error_stats["other_errors"] += 1
 
-                        # Process chunk using mapPartitions
-                        processed_rdd = chunk_df.rdd.mapPartitions(process_partition)
-                        processed_chunk_df = spark.createDataFrame(
-                            processed_rdd, schema=output_schema
-                        )
-                        processed_chunk_df.cache()
+                processed_batch_df.unpersist()
+                gc.collect()
 
-                        chunk_count = processed_chunk_df.count()
-                        file_processed_count += chunk_count
-                        total_processed += chunk_count
+            logger.info(f"  {'=' * 55}")
+            logger.info(f"  Merging {num_batches} batches into final file...")
 
-                        # Write this chunk to temporary storage
-                        chunk_output_path = (
-                            f"{temp_chunk_dir}/chunk_{chunk_idx:05d}.parquet"
-                        )
-                        processed_chunk_df.write.mode("overwrite").parquet(
-                            chunk_output_path
-                        )
+            merged_df = spark.read.parquet(f"{batch_output_dir}/batch_*.parquet")
+            final_output_path = f"{OUTPUT_DIR}/{file_name}"
+            merged_df.write.mode("overwrite").parquet(final_output_path)
 
-                        print(
-                            f"    ✓ Chunk {chunk_idx + 1}/{num_chunks} saved ({chunk_count:,} records)"
-                        )
+            shutil.rmtree(batch_output_dir, ignore_errors=True)
 
-                        # Collect statistics for this chunk
-                        business_info_rows = processed_chunk_df.select(
-                            "business_info"
-                        ).collect()
+            file_elapsed = (time.time() - file_start_time) / 60
+            logger.info(
+                f"  ✓ File complete: {file_stats['success']:,} success, {file_stats['errors']:,} errors"
+            )
+            logger.info(f"  Total time: {file_elapsed:.1f} minutes\n")
 
-                        for row in business_info_rows:
-                            try:
-                                info = json.loads(row.business_info)
-                                status = info.get("fetch_status", "success")
-                                if status == "success":
-                                    file_chunk_stats["success"] += 1
-                                    total_error_stats["success"] += 1
-                                elif status in total_error_stats:
-                                    file_chunk_stats["errors"] += 1
-                                    total_error_stats[status] += 1
-                                else:
-                                    file_chunk_stats["errors"] += 1
-                                    total_error_stats["other_errors"] += 1
-                            except Exception:
-                                file_chunk_stats["errors"] += 1
-                                total_error_stats["other_errors"] += 1
+            return final_output_path
 
-                        # Unpersist to free memory
-                        processed_chunk_df.unpersist()
-                        gc.collect()
-
-                    except Exception as chunk_e:
-                        print(
-                            f"    ✗ Error processing chunk {chunk_idx + 1}: {str(chunk_e)}"
-                        )
-                        continue
-
-                # After all chunks are processed, merge them into final output
-                print(f"  {'=' * 55}")
-                print(f"  Merging {num_chunks} chunks into final output...")
-
-                try:
-                    # Read all chunks and write as single parquet file
-                    merged_df = spark.read.parquet(f"{temp_chunk_dir}/chunk_*.parquet")
-                    final_output_path = f"{OUTPUT_DIR}/{file_name}"
-                    merged_df.write.mode("overwrite").parquet(final_output_path)
-
-                    print(
-                        f"  ✓ File complete: {file_processed_count:,} records processed"
-                    )
-                    print(
-                        f"  Status: {file_chunk_stats['success']:,} success, {file_chunk_stats['errors']:,} errors\n"
-                    )
-                except Exception as merge_e:
-                    print(f"  ✗ Error merging chunks: {str(merge_e)}\n")
-
-                try:
-                    shutil.rmtree(temp_chunk_dir, ignore_errors=True)
-                except:
-                    pass
-
-            except Exception as e:
-                print(f"  ✗ Error processing file: {str(e)}\n")
-                continue
-
-        # Print summary statistics
-        print(f"\n{'=' * 60}")
-        print("Processing Complete!")
-        print(f"Total files: {total_files}")
-        print(f"Total records processed: {total_processed:,}")
-        print("\nError Statistics:")
-        print(f"  ✓ Success: {total_error_stats['success']:,}")
-        print(f"  ⏱ Timeout: {total_error_stats['timeout']:,}")
-        print(f"  🔌 Connection errors: {total_error_stats['connection_error']:,}")
-        print(f"  📄 Invalid status: {total_error_stats['invalid_status']:,}")
-        print(f"  📭 Empty content: {total_error_stats['empty_content']:,}")
-        print(f"  📄 Empty HTML: {total_error_stats['empty_html']:,}")
-        print(f"  📭 No response record: {total_error_stats['no_response_record']:,}")
-        print(f"  ⚠ WARC parse errors: {total_error_stats['warc_parse_error']:,}")
-        print(f"  ⚠ Invalid record: {total_error_stats['invalid_record']:,}")
-        print(f"  ⚠ Processing errors: {total_error_stats['processing_error']:,}")
-        print(f"  ⚠ Other errors: {total_error_stats['other_errors']:,}")
-
-        success_rate = (
-            (total_error_stats["success"] / total_processed * 100)
-            if total_processed > 0
-            else 0
-        )
-        print(f"\nSuccess rate: {success_rate:.1f}%")
-        print(f"{'=' * 60}\n")
-
-        logger.info(
-            f"Task completed. Total files: {total_files}, Total records: {total_processed:,}, Success rate: {success_rate:.1f}%"
-        )
-
-        return {"input_dir": str(OUTPUT_DIR)}
+        except Exception as e:
+            logger.info(f"  ✗ Error processing file: {str(e)}\n")
+            raise
+        finally:
+            spark.stop()
 
     @task
     def create_cc_table(input_dir):
-        """Merge all processed parquet files into a single output file."""
-        logger.info(f"input_dir: {input_dir} ")
+        """Merge all processed parquet files into a single output file"""
+        spark = get_spark_session("Merge")
 
-        input_dir = f"{input_dir}/*.parquet"
-        output_file = "/opt/shared-data/cc/cc_merged.parquet"
+        try:
+            logger.info(f"Merging files from: {input_dir}")
+            input_path = f"{input_dir}/*.parquet"
+            output_file = "/opt/shared-data/cc/cc_merged.parquet"
 
-        df = spark.read.parquet(input_dir)
-        df.write.mode("overwrite").parquet(output_file)
+            df = spark.read.parquet(input_path)
+            df.write.mode("overwrite").parquet(output_file)
 
-        logger.info(f"✓ Merged {df.count()} rows into {output_file}")
-        return output_file
+            logger.info(f"Merged {df.count()} rows into {output_file}")
+            return output_file
+        finally:
+            spark.stop()
 
     @task
     def load_table(parquet_path, table_name):
-        logger.info(f"parquet_path: {parquet_path} and table :{table_name} ")
+        """Load merged parquet data to PostgreSQL"""
+        spark = get_spark_session("Load")
 
-        df = spark.read.parquet(parquet_path)
+        try:
+            logger.info(f"Loading {parquet_path} to {table_name}")
+            df = spark.read.parquet(parquet_path)
 
-        df.write.format("jdbc").option("url", POSTGRES_JDBC_URL).option(
-            "dbtable", table_name
-        ).option("user", POSTGRES_PROPERTIES["user"]).option(
-            "password", POSTGRES_PROPERTIES["password"]
-        ).option("driver", POSTGRES_PROPERTIES["driver"]).mode("overwrite").save()
+            df.write.format("jdbc").option("url", POSTGRES_JDBC_URL).option(
+                "dbtable", table_name
+            ).option("user", POSTGRES_PROPERTIES["user"]).option(
+                "password", POSTGRES_PROPERTIES["password"]
+            ).option("driver", POSTGRES_PROPERTIES["driver"]).mode("overwrite").save()
 
-        return f"{table_name} loaded"
+            logger.info(f"{table_name} loaded successfully")
+            return f"{table_name} loaded"
+        finally:
+            spark.stop()
 
-    @task
-    def cleanup():
-        """Clean up resources after all tasks are complete."""
-        spark.stop()
-        logger.info("✅ Spark session stopped successfully")
-
-    # Task chaining using TaskFlow API
+    # Task execution
     cc_index_urls_list = get_cc_index_urls()
+    au_urls = process_files_with_duckdb(cc_index_urls_list)
+    split_files_list = split_parquet_files()
 
-    processed_parquet = process_with_spark_distributed()
-    merged_parquet = create_cc_table(input_dir=processed_parquet["input_dir"])
+    # Process files sequentially using chain operator
+    # expand() creates dynamic mapped tasks, but we use max_active_tis_per_dagrun to serialize
+    processed_files = process_single_file.expand(file_path=split_files_list)
+
+    # Merge and load after all files are processed
+    merged_parquet = create_cc_table(input_dir=OUTPUT_DIR)
     cc_table = load_table(parquet_path=merged_parquet, table_name="cc_table")
 
-    # Set task dependencies
+    # Set dependencies
     (
         cc_index_urls_list
-        >> process_files_with_duckdb(cc_index_urls_list)
-        >> split_parquet_files()
-        >> processed_parquet
+        >> au_urls
+        >> split_files_list
+        >> processed_files
         >> merged_parquet
         >> cc_table
-        >> cleanup()
     )
 
 

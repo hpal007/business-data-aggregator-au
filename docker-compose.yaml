@@ -15,7 +15,7 @@ x-airflow-common:
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
     AIRFLOW__CORE__FERNET_KEY: ''
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
-    AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
     # WARNING: Use _PIP_ADDITIONAL_REQUIREMENTS option ONLY for a quick checks
@@ -154,11 +154,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '5.0'      # Adjust based on your host
-          memory: 6G       # Increase if more RAM
+          cpus: '8.0'      # Adjust based on your host
+          memory: 8G       # Increase if more RAM
         reservations:
-          cpus: '1.0'
-          memory: 2G
+          cpus: '6.0'
+          memory: 6G
     depends_on:
       <<: *airflow-common-depends-on
       airflow-apiserver:

@@ -6,10 +6,41 @@ import json
 import re
 import os
 from bs4 import BeautifulSoup
+from bs4.builder import XMLParsedAsHTMLWarning
+import warnings
 from warcio.archiveiterator import ArchiveIterator
 from pathlib import Path
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
+import threading
+
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 USER_AGENT = "cc-get-started/1.0 (Example data retrieval script; yourname@example.com)"
+
+# Thread-local storage for session (one per worker thread)
+_thread_local = threading.local()
+
+
+def get_session():
+    """Get or create a requests session with connection pooling"""
+    if not hasattr(_thread_local, "session"):
+        session = requests.Session()
+
+        # Configure retries and connection pooling
+        retry_strategy = Retry(
+            total=2,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy, pool_connections=10, pool_maxsize=10
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        _thread_local.session = session
+
+    return _thread_local.session
 
 
 # === Improved Regex Definitions ===
@@ -71,7 +102,7 @@ IGNORED_PARENT_TAGS = {"script", "style", "noscript", "meta", "link"}
 
 def fetch_page_from_cc(record, myagent=USER_AGENT):
     """
-    Fetch page from Common Crawl with timeout and error handling
+    Fetch page from Common Crawl with connection pooling and optimized timeout
     Returns tuple: (soup, error_info)
     """
     error_info = {"status": "success", "error": None}
@@ -84,74 +115,77 @@ def fetch_page_from_cc(record, myagent=USER_AGENT):
 
         byte_range = f"bytes={offset}-{offset + length - 1}"
 
-        # Make request with detailed timeout handling
+        # Use connection pooling session
+        session = get_session()
+
+        # Make request with optimized timeout
         try:
-            response = requests.get(
+            response = session.get(
                 s3_url,
                 headers={"user-agent": myagent, "Range": byte_range},
                 stream=True,
-                timeout=15,
+                timeout=10,  # Reduced from 15 to 10 seconds
             )
         except requests.exceptions.Timeout:
             error_info["status"] = "timeout"
-            error_info["error"] = "Request timed out after 15 seconds"
+            error_info["error"] = "Request timed out"
             return None, error_info
         except requests.exceptions.ConnectionError:
             error_info["status"] = "connection_error"
-            error_info["error"] = "Failed to establish connection"
+            error_info["error"] = "Connection failed"
             return None, error_info
         except requests.exceptions.RequestException as e:
             error_info["status"] = "request_error"
-            error_info["error"] = f"Request failed: {str(e)}"
+            error_info["error"] = str(e)[:50]
             return None, error_info
 
         # Check response status
         if response.status_code != 206:
             error_info["status"] = "invalid_status"
-            error_info["error"] = f"Expected status 206, got {response.status_code}"
+            error_info["error"] = f"Status {response.status_code}"
             return None, error_info
 
-        # Parse WARC record
+        # Parse WARC record with optimized reading
         try:
             stream = ArchiveIterator(response.raw)
             for warc_record in stream:
                 if warc_record.rec_type == "response":
                     html_bytes = warc_record.content_stream().read()
 
-                    # Check if we got any content
                     if not html_bytes:
                         error_info["status"] = "empty_content"
-                        error_info["error"] = "No content received from WARC record"
+                        error_info["error"] = "No content"
                         return None, error_info
 
+                    # Faster decode with error ignoring
                     html_text = html_bytes.decode("utf-8", errors="ignore")
-                    soup = BeautifulSoup(html_text, "html.parser")
 
-                    # Verify soup has content
-                    if not soup or len(soup.get_text(strip=True)) < 10:
+                    # Quick check before parsing
+                    if len(html_text) < 50:
                         error_info["status"] = "empty_html"
-                        error_info["error"] = "HTML content too short or empty"
+                        error_info["error"] = "Content too short"
                         return None, error_info
 
+                    # Use html.parser instead of lxml for speed
+                    soup = BeautifulSoup(html_text, "html.parser")
                     return soup, error_info
 
-            # No response record found in WARC
             error_info["status"] = "no_response_record"
-            error_info["error"] = "No response record found in WARC stream"
+            error_info["error"] = "No response found"
             return None, error_info
 
         except Exception as e:
             error_info["status"] = "warc_parse_error"
-            error_info["error"] = f"WARC parsing failed: {str(e)}"
+            error_info["error"] = str(e)[:50]
             return None, error_info
 
     except ValueError as e:
         error_info["status"] = "invalid_record"
-        error_info["error"] = f"Invalid record data: {str(e)}"
+        error_info["error"] = str(e)[:50]
         return None, error_info
     except Exception as e:
         error_info["status"] = "unknown_error"
-        error_info["error"] = f"Unexpected error: {str(e)}"
+        error_info["error"] = str(e)[:50]
         return None, error_info
 
 
@@ -221,17 +255,6 @@ def is_likely_company_name(text, parent_tag):
         "terms and conditions",
         "privacy policy",
         "copyright",
-        "all rights",
-        "sign up",
-        "log in",
-        "register",
-        "subscribe",
-        "download",
-        "cart is",
-        "email address",
-        "service provided by",
-        "advertising service",
-        "management and message",
     ]
 
     text_lower = text.lower()
@@ -254,44 +277,18 @@ def is_likely_address(text):
     generic_phrases = [
         "life in",
         "living in",
-        "progression to",
         "visit",
         "located in",
         "based in",
-        "operating in",
-        "serving",
-        "around melbourne",
-        "around sydney",
-        "select a suburb",
-        "choose from",
-        "delivered on behalf",
         "welcome to",
         "your local",
         "trusted resource",
-        "since 20",
-        "discover the best",
-        "trade services",
-        "contact hours",
-        "support contact",
-        "public holidays",
-        "monday",
-        "tuesday",
-        "partnership",
-        "gov ",
-        "hospital",
-        "directory",
     ]
 
     if any(phrase in text_lower for phrase in generic_phrases):
         return False
 
     if text.startswith("http") or "://" in text:
-        return False
-
-    if any(ext in text_lower for ext in [".jpg", ".png", ".gif", ".jpeg"]):
-        return False
-
-    if len(text.split()) <= 3 and POSTCODE_RE.search(text):
         return False
 
     if len(text) < 15 or len(text) > 200:
@@ -308,15 +305,14 @@ def is_likely_address(text):
 
 
 def extract_business_info_from_soup(soup, error_info=None):
-    """Enhanced extraction with better filtering and error tracking"""
-    # If fetch failed, return error information
+    """Optimized extraction with early exit"""
     if soup is None:
         if error_info:
             return {
                 "fetch_status": error_info["status"],
                 "fetch_error": error_info["error"],
             }
-        return {"fetch_status": "failed", "fetch_error": "Unknown fetch error"}
+        return {"fetch_status": "failed", "fetch_error": "Unknown error"}
 
     results = {
         "fetch_status": "success",
@@ -326,29 +322,26 @@ def extract_business_info_from_soup(soup, error_info=None):
         "Emails": [],
         "Phones": [],
         "Addresses": [],
-        "StructuredData": [],
     }
     seen = {key: set() for key in results.keys()}
-    found_abns = set()
 
-    for text_node in soup.find_all(string=True):
-        if not text_node.strip():
+    # Extract text nodes efficiently
+    text_nodes = soup.find_all(string=True)
+
+    for text_node in text_nodes:
+        txt = text_node.strip()
+        if not txt or len(txt) > 500:
             continue
 
         parent = text_node.parent
         if parent and parent.name and parent.name.lower() in IGNORED_PARENT_TAGS:
             continue
 
-        txt = text_node.strip()
-
-        if len(txt) > 500:
-            continue
-
+        # Fast regex matching
         for m in ABN_RE.finditer(txt):
             normalized = normalize_abn_acn(m.group(1))
             if len(normalized) == 11 and normalized not in seen["ABN"]:
                 seen["ABN"].add(normalized)
-                found_abns.add(normalized)
                 results["ABN"].append({"matched_text": normalized})
 
         for m in ACN_RE.finditer(txt):
@@ -357,83 +350,30 @@ def extract_business_info_from_soup(soup, error_info=None):
                 seen["ACN"].add(normalized)
                 results["ACN"].append({"matched_text": normalized})
 
-        for m in PTY_LTD_RE.finditer(txt):
-            company = m.group(0).strip()
+        for em in EMAIL_RE.findall(txt):
+            if em not in seen["Emails"]:
+                seen["Emails"].add(em)
+                results["Emails"].append({"matched_text": em})
+
+        for m in PHONE_RE.finditer(txt):
+            phone = normalize_phone(m.group(0))
+            if phone and phone not in seen["Phones"]:
+                seen["Phones"].add(phone)
+                results["Phones"].append({"matched_text": phone})
+
+        if is_likely_address(txt):
+            if txt not in seen["Addresses"]:
+                seen["Addresses"].add(txt)
+                results["Addresses"].append({"matched_text": txt})
+
+        for com in PTY_LTD_RE.finditer(txt):
+            company = com.group(0).strip()
             if (
                 is_likely_company_name(company, parent)
                 and company not in seen["CompanyName"]
             ):
                 seen["CompanyName"].add(company)
                 results["CompanyName"].append({"matched_text": company})
-
-        for em in EMAIL_RE.findall(txt):
-            if em not in seen["Emails"] and not em.endswith(
-                (".png", ".jpg", ".gif", ".jpeg")
-            ):
-                seen["Emails"].add(em)
-                results["Emails"].append({"matched_text": em})
-
-        for m in PHONE_RE.finditer(txt):
-            phone = normalize_phone(m.group(0))
-            if phone:
-                phone_digits = re.sub(r"[^\d]", "", phone)
-                if phone_digits not in found_abns and phone not in seen["Phones"]:
-                    seen["Phones"].add(phone)
-                    results["Phones"].append({"matched_text": phone})
-
-        if is_likely_address(txt):
-            addr = txt.strip()
-            if addr not in seen["Addresses"]:
-                seen["Addresses"].add(addr)
-                results["Addresses"].append({"matched_text": addr})
-
-    for script in soup.find_all("script", type=lambda t: t and "ld+json" in t.lower()):
-        try:
-            data = json.loads(script.string)
-        except Exception:
-            continue
-
-        orgs = []
-        if isinstance(data, dict) and data.get("@type") == "Organization":
-            orgs.append(data)
-        elif isinstance(data, list):
-            orgs = [
-                item
-                for item in data
-                if isinstance(item, dict) and item.get("@type") == "Organization"
-            ]
-
-        for org in orgs:
-            org_data = {
-                "name": org.get("name"),
-                "telephone": org.get("telephone"),
-                "email": org.get("email"),
-            }
-
-            if "address" in org:
-                addr = org["address"]
-                if isinstance(addr, dict):
-                    addr_parts = [
-                        addr.get("streetAddress"),
-                        addr.get("addressLocality"),
-                        addr.get("addressRegion"),
-                        addr.get("postalCode"),
-                    ]
-                    org_data["address"] = ", ".join(filter(None, addr_parts))
-                elif isinstance(addr, str):
-                    org_data["address"] = addr
-
-            org_data = {k: v for k, v in org_data.items() if v}
-            if org_data and org_data not in results["StructuredData"]:
-                results["StructuredData"].append(org_data)
-
-    # Remove empty categories (except fetch_status)
-    # results = {k: v for k, v in results.items() if v or k == "fetch_status"}
-
-    # Add flag if no business info found
-    data_keys = set(results.keys()) - {"fetch_status", "fetch_error"}
-    if not data_keys:
-        results["info"] = "No business info found"
 
     return results
 
@@ -443,20 +383,10 @@ def extract_json_fields(business_info_json_str):
         return None, None, None
     try:
         data = json.loads(business_info_json_str)
-        ABN = (
-            data["ABN"][0]["matched_text"]
-            if data.get("ABN") and len(data["ABN"]) > 0
-            else None
-        )
-        ACN = (
-            data["ACN"][0]["matched_text"]
-            if data.get("ACN") and len(data["ACN"]) > 0
-            else None
-        )
+        ABN = data["ABN"][0]["matched_text"] if data.get("ABN") else None
+        ACN = data["ACN"][0]["matched_text"] if data.get("ACN") else None
         CompanyName = (
-            data["CompanyName"][0]["matched_text"]
-            if data.get("CompanyName") and len(data["CompanyName"]) > 0
-            else None
+            data["CompanyName"][0]["matched_text"] if data.get("CompanyName") else None
         )
         return ABN, ACN, CompanyName
     except Exception:
@@ -465,10 +395,8 @@ def extract_json_fields(business_info_json_str):
 
 def process_partition(iterator):
     """
-    Process a partition of records. This function is serializable and will be
-    executed on Spark workers without pickling issues.
+    Process a partition of records with connection pooling.
     """
-
     for row in iterator:
         try:
             record = {
@@ -483,7 +411,6 @@ def process_partition(iterator):
             business_info = json.dumps(info, ensure_ascii=False)
             ABN, ACN, CompanyName = extract_json_fields(business_info)
 
-            # Yield all original columns plus business_info
             yield (
                 row.url,
                 row.url_host_tld,
@@ -503,7 +430,7 @@ def process_partition(iterator):
             error_json = json.dumps(
                 {
                     "fetch_status": "processing_error",
-                    "fetch_error": f"Processing failed: {str(e)}",
+                    "fetch_error": str(e)[:100],
                 },
                 ensure_ascii=False,
             )
@@ -517,5 +444,8 @@ def process_partition(iterator):
                 row.warc_filename,
                 row.warc_record_offset,
                 row.warc_record_length,
+                None,
+                None,
+                None,
                 error_json,
             )
