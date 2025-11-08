@@ -154,11 +154,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '8.0'      # Adjust based on your host
-          memory: 8G       # Increase if more RAM
+          cpus: '10.0'      # Adjust based on your host
+          memory: 9G       # Increase if more RAM
         reservations:
-          cpus: '6.0'
-          memory: 6G
+          cpus: '9.0'
+          memory: 8G
     depends_on:
       <<: *airflow-common-depends-on
       airflow-apiserver:

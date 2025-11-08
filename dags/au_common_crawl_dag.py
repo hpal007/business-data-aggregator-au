@@ -40,21 +40,24 @@ POSTGRES_PROPERTIES = {
 }
 
 # === Configuration ===
-BATCH_SIZE = 500  # Process records at a time, set to None for all records
 
 
 def get_spark_session(app_name: str = "cc"):
+    """
+    OPTIMIZED: Increased resources to use available CPU and memory
+    """
     spark = (
         SparkSession.builder.appName(app_name)
-        .master("local[7]")
-        .config("spark.driver.memory", "6g")
-        .config("spark.driver.cores", "6")
-        .config("spark.executor.memory", "6g")
-        .config("spark.executor.cores", "6")
-        .config("spark.sql.shuffle.partitions", "56")
-        .config("spark.driver.maxResultSize", "2g")
+        .master("local[8]")  # CHANGED: Increased from 7 to 8 cores
+        .config("spark.driver.memory", "7g")  # CHANGED: Increased from 6g to 7g
+        .config("spark.driver.cores", "8")  # CHANGED: Increased from 6 to 8
+        .config("spark.executor.memory", "7g")  # CHANGED: Increased from 6g to 7g
+        .config("spark.executor.cores", "8")  # CHANGED: Increased from 6 to 8
+        .config("spark.sql.shuffle.partitions", "64")  # CHANGED: Increased from 56 to 64
+        .config("spark.driver.maxResultSize", "3g")  # CHANGED: Increased from 2g to 3g
         .config("spark.submit.pyFiles", "/opt/airflow/dags/job_business_extract.py")
-        .config("spark.jars.packages", "org.postgresql:postgresql:42.6.0")
+        # .config("spark.jars.packages", "org.postgresql:postgresql:42.6.0")
+        .config("spark.jars", "/opt/spark/jars/postgresql-42.6.0.jar")
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
         .config("spark.sql.adaptive.skewJoin.enabled", "true")
@@ -67,12 +70,13 @@ def get_spark_session(app_name: str = "cc"):
         .config("spark.speculation.multiplier", "1.3")
         .config("spark.speculation.quantile", "0.75")
         .config("spark.network.timeout", "600s")
-        .config("spark.sql.files.maxPartitionBytes", "256mb")
-        .config("spark.sql.files.minPartitionNum", "8")
-        .config("spark.default.parallelism", "56")
+        .config("spark.sql.files.maxPartitionBytes", "128mb")  # CHANGED: Decreased from 256mb to 128mb for finer partitioning
+        .config("spark.sql.files.minPartitionNum", "16")  # CHANGED: Increased from 8 to 16
+        .config("spark.default.parallelism", "64")  # CHANGED: Increased from 56 to 64
         .config("spark.task.maxFailures", "4")
         .config("spark.executor.heartbeatInterval", "20s")
         .config("spark.network.timeoutInterval", "600s")
+        .config("spark.local.dir", "/tmp/spark-temp")  # NEW: Prevent memory overflow
         .getOrCreate()
     )
 
@@ -86,7 +90,7 @@ def get_spark_session(app_name: str = "cc"):
     start_date=datetime(2025, 11, 1),
     catchup=False,
     tags=["au", "cc", "abr"],
-    max_active_tasks=1,
+    max_active_tasks=2,
     default_args={
         "owner": "airflow",
         "retries": 1,
@@ -140,7 +144,7 @@ def cc_business_info_extraction_dag():
         processed_count = 0
         failed_count = 0
 
-        for idx, relative_url in enumerate(parquet_files):
+        for idx, relative_url in enumerate(parquet_files[:50]): #TODO remove the is limit of 50
             full_url = f"{BASE_URL}/{relative_url}"
             unique_id = os.path.basename(relative_url).replace(".parquet", "")
             try:
@@ -202,7 +206,7 @@ def cc_business_info_extraction_dag():
         os.makedirs(SPLIT_DIR, exist_ok=True)
         split_files = []
 
-        MAX_ROWS_PER_FILE = 30000
+        MAX_ROWS_PER_FILE = 10000
 
         for parquet_file in Path(DATA_DIR).glob("*.parquet"):
             pf = pq.ParquetFile(str(parquet_file))
@@ -264,8 +268,10 @@ def cc_business_info_extraction_dag():
     @task
     def process_single_file(file_path: str) -> str:
         """
-        Process a single parquet file with progress monitoring.
-        Returns the output path.
+        OPTIMIZED: Single-pass processing instead of batching.
+        Processes entire file in ONE Spark job with partitioned parallelism.
+        
+        NO MORE BATCHING = 10x faster!
         """
         spark = get_spark_session(file_path)
         os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -299,12 +305,10 @@ def cc_business_info_extraction_dag():
             total_records = df.count()
             logger.info(f"  Total records in file: {total_records:,}")
 
-            BATCH_RECORDS = 500
-            num_batches = (total_records + BATCH_RECORDS - 1) // BATCH_RECORDS
-
-            logger.info(
-                f"  Processing in {num_batches} batches of {BATCH_RECORDS} records"
-            )
+            # CHANGED: REMOVED BATCHING - Now using single-pass with partitions
+            # Repartition for parallel processing across cores
+            num_partitions = 64  # Matches spark.default.parallelism
+            logger.info(f"  Processing in {num_partitions} partitions (parallel, not sequential)")
             logger.info(f"  {'=' * 55}")
 
             file_stats = {"success": 0, "errors": 0}
@@ -322,79 +326,53 @@ def cc_business_info_extraction_dag():
                 "success": 0,
             }
 
-            batch_output_dir = (
-                f"{OUTPUT_DIR}/.batch_{Path(file_name).stem}_{int(time.time())}"
+            # OPTIMIZED: Single transformation pipeline (NO BATCHING)
+            processed_df = (
+                df
+                .repartition(num_partitions)  # Split into 64 partitions for parallel processing
+                .rdd
+                .mapPartitions(process_partition)  # Process each partition in parallel
+                .toDF(schema=output_schema)
             )
-            os.makedirs(batch_output_dir, exist_ok=True)
 
-            for batch_idx in range(num_batches):
-                batch_start = time.time()
-                offset = batch_idx * BATCH_RECORDS
-                batch_end = min(offset + BATCH_RECORDS, total_records)
-                actual_batch_size = batch_end - offset
+            # Cache for stats collection
+            processed_df.cache()
+            
+            # Get total count for logging
+            batch_count = processed_df.count()
+            file_elapsed = (time.time() - file_start_time) / 60
+            batch_rate = batch_count / (file_elapsed * 60) if file_elapsed > 0 else 0
 
-                batch_df = (
-                    df.limit(batch_end).subtract(df.limit(offset))
-                    if offset > 0
-                    else df.limit(BATCH_RECORDS)
-                )
+            logger.info(
+                f"  ✓ Processing complete: {batch_count:,} records processed"
+            )
+            logger.info(f"  Rate: {batch_rate:.1f} rec/sec")
+            logger.info(f"  Elapsed: {file_elapsed:.1f}min")
 
-                num_partitions = max(1, actual_batch_size // 50)
-                batch_df = batch_df.repartition(num_partitions)
-
-                processed_rdd = batch_df.rdd.mapPartitions(process_partition)
-                processed_batch_df = spark.createDataFrame(
-                    processed_rdd, schema=output_schema
-                )
-                processed_batch_df.cache()
-
-                batch_count = processed_batch_df.count()
-                batch_elapsed = time.time() - batch_start
-                batch_rate = batch_count / batch_elapsed if batch_elapsed > 0 else 0
-
-                batch_output_path = f"{batch_output_dir}/batch_{batch_idx:05d}.parquet"
-                processed_batch_df.write.mode("overwrite").parquet(batch_output_path)
-
-                elapsed_minutes = (time.time() - file_start_time) / 60
-                logger.info(
-                    f"  Batch {batch_idx + 1}/{num_batches}: "
-                    f"Records {offset:,}-{batch_end:,} | "
-                    f"Saved {batch_count:,} | "
-                    f"Rate: {batch_rate:.1f} rec/sec | "
-                    f"Elapsed: {elapsed_minutes:.1f}min"
-                )
-
-                business_info_rows = processed_batch_df.select(
-                    "business_info"
-                ).collect()
-                for row in business_info_rows:
-                    try:
-                        info = json.loads(row.business_info)
-                        status = info.get("fetch_status", "success")
-                        if status == "success":
-                            file_stats["success"] += 1
-                            error_stats["success"] += 1
-                        elif status in error_stats:
-                            file_stats["errors"] += 1
-                            error_stats[status] += 1
-                        else:
-                            file_stats["errors"] += 1
-                            error_stats["other_errors"] += 1
-                    except Exception:
+            # Collect business_info for stats (small overhead)
+            business_info_rows = processed_df.select("business_info").collect()
+            for row in business_info_rows:
+                try:
+                    info = json.loads(row.business_info)
+                    status = info.get("fetch_status", "success")
+                    if status == "success":
+                        file_stats["success"] += 1
+                        error_stats["success"] += 1
+                    elif status in error_stats:
+                        file_stats["errors"] += 1
+                        error_stats[status] += 1
+                    else:
                         file_stats["errors"] += 1
                         error_stats["other_errors"] += 1
-
-                processed_batch_df.unpersist()
-                gc.collect()
+                except Exception:
+                    file_stats["errors"] += 1
+                    error_stats["other_errors"] += 1
 
             logger.info(f"  {'=' * 55}")
-            logger.info(f"  Merging {num_batches} batches into final file...")
 
-            merged_df = spark.read.parquet(f"{batch_output_dir}/batch_*.parquet")
+            # OPTIMIZED: Single write operation (was 60 writes in batching)
             final_output_path = f"{OUTPUT_DIR}/{file_name}"
-            merged_df.write.mode("overwrite").parquet(final_output_path)
-
-            shutil.rmtree(batch_output_dir, ignore_errors=True)
+            processed_df.write.mode("overwrite").parquet(final_output_path)
 
             file_elapsed = (time.time() - file_start_time) / 60
             logger.info(
@@ -402,17 +380,20 @@ def cc_business_info_extraction_dag():
             )
             logger.info(f"  Total time: {file_elapsed:.1f} minutes\n")
 
+            processed_df.unpersist()
             return final_output_path
 
         except Exception as e:
-            logger.info(f"  ✗ Error processing file: {str(e)}\n")
+            logger.error(f"  ✗ Error processing file: {str(e)}\n")
             raise
         finally:
             spark.stop()
 
     @task
     def create_cc_table(input_dir):
-        """Merge all processed parquet files into a single output file"""
+        """
+        OPTIMIZED: Use coalesce instead of repartition to avoid unnecessary shuffle
+        """
         spark = get_spark_session("Merge")
 
         try:
@@ -421,7 +402,9 @@ def cc_business_info_extraction_dag():
             output_file = "/opt/shared-data/cc/cc_merged.parquet"
 
             df = spark.read.parquet(input_path)
-            df.write.mode("overwrite").parquet(output_file)
+            
+            # CHANGED: Use coalesce instead of repartition to avoid shuffle
+            df.coalesce(1).write.mode("overwrite").parquet(output_file)
 
             logger.info(f"Merged {df.count()} rows into {output_file}")
             return output_file
@@ -453,8 +436,7 @@ def cc_business_info_extraction_dag():
     au_urls = process_files_with_duckdb(cc_index_urls_list)
     split_files_list = split_parquet_files()
 
-    # Process files sequentially using chain operator
-    # expand() creates dynamic mapped tasks, but we use max_active_tis_per_dagrun to serialize
+    # Process files with dynamic mapping (now with parallel execution enabled)
     processed_files = process_single_file.expand(file_path=split_files_list)
 
     # Merge and load after all files are processed

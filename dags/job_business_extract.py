@@ -23,18 +23,23 @@ _thread_local = threading.local()
 
 
 def get_session():
-    """Get or create a requests session with connection pooling"""
+    """
+    Get or create a requests session with connection pooling.
+    OPTIMIZED: Improved connection pooling and retry strategy
+    """
     if not hasattr(_thread_local, "session"):
         session = requests.Session()
 
-        # Configure retries and connection pooling
+        # CHANGED: More aggressive retry strategy - fail fast
         retry_strategy = Retry(
-            total=2,
-            backoff_factor=0.5,
-            status_forcelist=[429, 500, 502, 503, 504],
+            total=1,  # CHANGED: Reduced from 2 to 1 (fail fast)
+            backoff_factor=0.3,  # CHANGED: Reduced from 0.5 to 0.3
+            status_forcelist=[429, 503, 504],  # CHANGED: Removed 500, 502 (transient errors)
         )
         adapter = HTTPAdapter(
-            max_retries=retry_strategy, pool_connections=10, pool_maxsize=10
+            max_retries=retry_strategy, 
+            pool_connections=20,  # CHANGED: Increased from 10
+            pool_maxsize=20  # CHANGED: Increased from 10
         )
         session.mount("http://", adapter)
         session.mount("https://", adapter)
@@ -102,7 +107,8 @@ IGNORED_PARENT_TAGS = {"script", "style", "noscript", "meta", "link"}
 
 def fetch_page_from_cc(record, myagent=USER_AGENT):
     """
-    Fetch page from Common Crawl with connection pooling and optimized timeout
+    Fetch page from Common Crawl with connection pooling and optimized timeout.
+    OPTIMIZED: More aggressive timeout, better error handling
     Returns tuple: (soup, error_info)
     """
     error_info = {"status": "success", "error": None}
@@ -120,11 +126,12 @@ def fetch_page_from_cc(record, myagent=USER_AGENT):
 
         # Make request with optimized timeout
         try:
+            # CHANGED: Reduced timeout from 10s to 8s (fail fast on slow servers)
             response = session.get(
                 s3_url,
                 headers={"user-agent": myagent, "Range": byte_range},
                 stream=True,
-                timeout=10,  # Reduced from 15 to 10 seconds
+                timeout=8,  # Aggressive timeout
             )
         except requests.exceptions.Timeout:
             error_info["status"] = "timeout"
@@ -305,7 +312,10 @@ def is_likely_address(text):
 
 
 def extract_business_info_from_soup(soup, error_info=None):
-    """Optimized extraction with early exit"""
+    """
+    Optimized extraction with early exit.
+    OPTIMIZED: Added limits to prevent excessive processing
+    """
     if soup is None:
         if error_info:
             return {
@@ -325,8 +335,11 @@ def extract_business_info_from_soup(soup, error_info=None):
     }
     seen = {key: set() for key in results.keys()}
 
-    # Extract text nodes efficiently
-    text_nodes = soup.find_all(string=True)
+    # CHANGED: Extract text nodes with limits
+    MAX_TEXT_NODES = 500  # NEW: Limit text nodes to process
+    MAX_RESULTS_PER_TYPE = 3  # NEW: Stop after finding 3 of each type
+    
+    text_nodes = soup.find_all(string=True)[:MAX_TEXT_NODES]
 
     for text_node in text_nodes:
         txt = text_node.strip()
@@ -336,6 +349,10 @@ def extract_business_info_from_soup(soup, error_info=None):
         parent = text_node.parent
         if parent and parent.name and parent.name.lower() in IGNORED_PARENT_TAGS:
             continue
+
+        # CHANGED: Early exit if we have enough of each type
+        if all(len(results[k]) >= MAX_RESULTS_PER_TYPE for k in results.keys() if k != "fetch_status"):
+            break
 
         # Fast regex matching
         for m in ABN_RE.finditer(txt):
@@ -396,6 +413,7 @@ def extract_json_fields(business_info_json_str):
 def process_partition(iterator):
     """
     Process a partition of records with connection pooling.
+    This function is called in parallel across multiple partitions.
     """
     for row in iterator:
         try:
