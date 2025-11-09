@@ -100,7 +100,7 @@ The data pipeline is orchestrated using Apache Airflow and consists of three mai
 -   **PyArrow**: Used for efficient handling of Parquet files, especially during splitting and processing of Common Crawl data.
 
 
-## AI Model Used & Rationale - TODO
+## AI Model Used & Rationale
 
 The project uses two pre-trained models from the Hugging Face `transformers` library for NLP tasks:
 
@@ -111,6 +111,22 @@ The project uses two pre-trained models from the Hugging Face `transformers` lib
 
 -   The **NER model** is used to extract structured information from unstructured text. This is a crucial step in identifying key business details from web page content.
 -   The **Zero-Shot Classification model** is used to categorize businesses into industries without needing a pre-trained model for that specific task. This is a flexible approach that allows for classification with a custom set of labels.
+
+## Design Choices and Entity Matching
+
+**Entity Matching Approach:**
+
+The primary method for matching entities between the ABR and Common Crawl datasets is based on the **ABN (Australian Business Number)**. This provides a robust and unique identifier for businesses.
+
+**Future Enhancements for Entity Matching and NLP:**
+
+While ABN is the primary key for matching, the pipeline also extracts `company_name` from Common Crawl data. This, along with the `raw_text_body` (raw HTML content from websites), offers significant opportunities for future enhancements:
+
+-   **Improved Company Name Extraction:** The currently extracted `company_name` can be further refined and improved using advanced NLP techniques.
+-   **NLP for Industry and Company Name Extraction:** The `raw_text_body` can be leveraged as input for more sophisticated NLP tasks, including:
+    *   **Industry Classification:** Using the `facebook/bart-large-mnli` zero-shot classifier (already integrated) or other models to more accurately determine a company's industry based on its website content.
+    *   **Enhanced Company Name Extraction:** Applying NER models (like `dbmdz/bert-large-cased-finetuned-conll03-english`) to the `raw_text_body` to extract company names more reliably, especially when direct ABN matching is not possible.
+    *   **Broader Entity Resolution:** Exploring fuzzy matching or other advanced techniques using `company_name` and other textual cues to link entities where ABNs are missing or inconsistent.
 
 ## Setup and Running Instructions
 
