@@ -100,7 +100,7 @@ The data pipeline is orchestrated using Apache Airflow and consists of three mai
 -   **PyArrow**: Used for efficient handling of Parquet files, especially during splitting and processing of Common Crawl data.
 
 
-## AI Model Used & Rationale
+## AI Model Used & Rationale - TODO
 
 The project uses two pre-trained models from the Hugging Face `transformers` library for NLP tasks:
 
@@ -154,7 +154,7 @@ While ABN is the primary key for matching, the pipeline also extracts `company_n
 The main Python scripts for data extraction and processing are located in the `dags/` directory:
 
 -   `au_australian_business_register_dag.py`: DAG for processing data from the Australian Business Register.
--   `au_common_crawl_dag.py`: DAG for processing data from the Common Crawl.
--   `push_to_db_dag.py`: DAG for loading data into the PostgreSQL database.
+-   `au_common_crawl_dag.py`: DAG for processing data from the Common Crawl with Checkpoint support.
+-   `push_to_db_dag.py`: DAG for loading data into the PostgreSQL database from stored Parquet files.
 -   `job_business_extract.py`: Contains the core logic for extracting business information from web page content.
 -   `utils.py`: Contains utility functions used by the DAGs.
