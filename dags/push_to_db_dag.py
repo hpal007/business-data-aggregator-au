@@ -1,30 +1,13 @@
 from airflow.sdk import dag, task
 from datetime import datetime, timedelta
 from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType, StructField, StringType, LongType
-from pyspark.sql.window import Window
 from pyspark.sql.functions import (
-    row_number,
-    monotonically_increasing_id,
     col,
     regexp_replace,
 )
-import requests
-import json
-import re
 import os
 import logging
-import gzip
-from bs4 import BeautifulSoup
-from warcio.archiveiterator import ArchiveIterator
 from pathlib import Path
-import duckdb
-from io import BytesIO
-import pyarrow.parquet as pq
-from job_business_extract import process_partition
-import gc
-import time
-import shutil
 
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -52,14 +35,12 @@ def get_spark_session(app_name: str = "cc"):
     spark = (
         SparkSession.builder.appName(app_name)
         .master("local[8]")  # CHANGED: Increased from 7 to 8 cores
-        .config("spark.driver.memory", "7g")  # CHANGED: Increased from 6g to 7g
-        .config("spark.driver.cores", "8")  # CHANGED: Increased from 6 to 8
-        .config("spark.executor.memory", "7g")  # CHANGED: Increased from 6g to 7g
-        .config("spark.executor.cores", "8")  # CHANGED: Increased from 6 to 8
-        .config(
-            "spark.sql.shuffle.partitions", "64"
-        )  # CHANGED: Increased from 56 to 64
-        .config("spark.driver.maxResultSize", "3g")  # CHANGED: Increased from 2g to 3g
+        .config("spark.driver.memory", "7g")
+        .config("spark.driver.cores", "8")
+        .config("spark.executor.memory", "7g")
+        .config("spark.executor.cores", "8")
+        .config("spark.sql.shuffle.partitions", "64")
+        .config("spark.driver.maxResultSize", "3g")
         .config("spark.submit.pyFiles", "/opt/airflow/dags/job_business_extract.py")
         # .config("spark.jars.packages", "org.postgresql:postgresql:42.6.0")
         .config("spark.jars", "/opt/spark/jars/postgresql-42.6.0.jar")
@@ -75,17 +56,13 @@ def get_spark_session(app_name: str = "cc"):
         .config("spark.speculation.multiplier", "1.3")
         .config("spark.speculation.quantile", "0.75")
         .config("spark.network.timeout", "600s")
-        .config(
-            "spark.sql.files.maxPartitionBytes", "128mb"
-        )  # CHANGED: Decreased from 256mb to 128mb for finer partitioning
-        .config(
-            "spark.sql.files.minPartitionNum", "16"
-        )  # CHANGED: Increased from 8 to 16
-        .config("spark.default.parallelism", "64")  # CHANGED: Increased from 56 to 64
+        .config("spark.sql.files.maxPartitionBytes", "128mb")
+        .config("spark.sql.files.minPartitionNum", "16")
+        .config("spark.default.parallelism", "64")
         .config("spark.task.maxFailures", "4")
         .config("spark.executor.heartbeatInterval", "20s")
         .config("spark.network.timeoutInterval", "600s")
-        .config("spark.local.dir", "/tmp/spark-temp")  # NEW: Prevent memory overflow
+        .config("spark.local.dir", "/tmp/spark-temp")
         .getOrCreate()
     )
 
@@ -139,7 +116,6 @@ def tester_dag_process_and_push_to_db():
                 )
 
             df = spark.read.parquet(parquet_path)
-
             df = clean_raw_text_body(df)
 
             df.write.format("jdbc").option("url", POSTGRES_JDBC_URL).option(
@@ -176,7 +152,7 @@ def tester_dag_process_and_push_to_db():
     abr_path = os.path.join("/opt/shared-data/abr/", "abr_tbl")
     merged_parquet = create_cc_table(OUTPUT_DIR)
     cc_table = load_cc_table(parquet_path=merged_parquet, table_name="cc_table")
-    abr_table = load_abr_table(parquet_path=abr_path, table_name="abr_tbl")
+    abr_table = load_abr_table(parquet_path=abr_path, table_name="abr_table")
 
     merged_parquet >> cc_table >> abr_table
 

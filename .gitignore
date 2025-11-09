@@ -12,3 +12,5 @@ plugins
 cc_processed_data
 huggingface_cache
 shared-data-volume_copy
+.ruff_cache
+.venv

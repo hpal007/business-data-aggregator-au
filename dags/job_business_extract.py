@@ -1,24 +1,17 @@
-from datetime import datetime, timedelta
-from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType, StructField, StringType, LongType
 import requests
 import json
 import re
-import os
 from bs4 import BeautifulSoup
 from bs4.builder import XMLParsedAsHTMLWarning
 import warnings
 from warcio.archiveiterator import ArchiveIterator
-from pathlib import Path
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import threading
 import time
-import random
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
-# NEW: Better User-Agent for Common Crawl
 USER_AGENT = "Mozilla/5.0 (compatible; ArchiveBot/1.0; +https://www.commoncrawl.org/faq/#how-do-you-crawl)"
 
 # Thread-local storage for session (one per worker thread)
@@ -66,8 +59,8 @@ def get_session():
 
         # NEW: Custom retry strategy that handles 403 errors
         retry_strategy = Retry(
-            total=5,  # CHANGED: Increased from 1 to 5 retries for 403 errors
-            backoff_factor=2,  # CHANGED: Exponential backoff with factor of 2 (1, 2, 4, 8, 16 seconds)
+            total=3,
+            backoff_factor=2,
             status_forcelist=[
                 429,
                 403,
@@ -123,7 +116,6 @@ EMAIL_RE = re.compile(
 )
 
 ABN_RE = re.compile(r"\bABN[:\s]*([0-9\s]{11,14})\b", re.IGNORECASE)
-ACN_RE = re.compile(r"\bACN[:\s]*([0-9\s]{9,11})\b", re.IGNORECASE)
 
 EXCLUDE_PHONE_PATTERNS = [
     r"^\d{1,2}\.\d{4}",
@@ -316,8 +308,8 @@ def normalize_phone(phone_str):
     return original
 
 
-def normalize_abn_acn(number_str):
-    """Remove spaces from ABN/ACN"""
+def normalize_abn(number_str):
+    """Remove spaces from ABN"""
     return re.sub(r"\s+", "", number_str)
 
 
@@ -403,7 +395,6 @@ def extract_business_info_from_soup(soup, error_info=None):
     results = {
         "fetch_status": "success",
         "ABN": [],
-        "ACN": [],
         "CompanyName": [],
         "Emails": [],
         "Phones": [],
@@ -437,16 +428,10 @@ def extract_business_info_from_soup(soup, error_info=None):
             break
 
         for m in ABN_RE.finditer(txt):
-            normalized = normalize_abn_acn(m.group(1))
+            normalized = normalize_abn(m.group(1))
             if len(normalized) == 11 and normalized not in seen["ABN"]:
                 seen["ABN"].add(normalized)
                 results["ABN"].append({"matched_text": normalized})
-
-        for m in ACN_RE.finditer(txt):
-            normalized = normalize_abn_acn(m.group(1))
-            if len(normalized) == 9 and normalized not in seen["ACN"]:
-                seen["ACN"].add(normalized)
-                results["ACN"].append({"matched_text": normalized})
 
         for em in EMAIL_RE.findall(txt):
             if em not in seen["Emails"]:
@@ -511,17 +496,31 @@ def process_partition(iterator):
             business_info = json.dumps(info, ensure_ascii=False)
             cc_abn, company_name = extract_json_fields(business_info)
 
-            # FIX: Extract only text content from body tag
-            # Remove all HTML tags and get clean text
             raw_text_body = None
             if soup:
                 body = soup.find("body")
+                footer = soup.find("footer")
                 if body:
-                    # Remove script and style tags first
+                    # Remove script and style tags inside body first
                     for script in body(["script", "style"]):
                         script.decompose()
-                    # Get all text, join with spaces, and clean up
-                    raw_text_body = body.get_text(separator=" ", strip=True)
+                    # Get cleaned text from body and replace \u0000
+                    body_text = body.get_text(separator=" ", strip=True).replace(
+                        "\u0000", ""
+                    )
+                else:
+                    body_text = ""
+                if footer:
+                    # Remove script and style tags inside footer if any
+                    for script in footer(["script", "style"]):
+                        script.decompose()
+                    # Get cleaned text from footer and replace \u0000
+                    footer_text = footer.get_text(separator=" ", strip=True).replace(
+                        "\u0000", ""
+                    )
+                else:
+                    footer_text = ""
+                raw_text_body = {"body": body_text, "footer": footer_text}
 
             yield (
                 row.url,

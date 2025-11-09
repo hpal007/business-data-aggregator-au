@@ -2,16 +2,15 @@ from airflow.sdk import dag, task
 from datetime import datetime, timedelta
 from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField, StringType, LongType
-from pyspark.sql.window import Window
-from pyspark.sql.functions import row_number, monotonically_increasing_id, col
+from pyspark.sql.functions import (
+    col,
+    regexp_replace,
+)
 import requests
 import json
-import re
 import os
 import logging
 import gzip
-from bs4 import BeautifulSoup
-from warcio.archiveiterator import ArchiveIterator
 from pathlib import Path
 import duckdb
 from io import BytesIO
@@ -246,7 +245,7 @@ def cc_business_info_extraction_dag():
             processed_count = 0
             failed_count = 0
 
-            for idx, relative_url in enumerate(parquet_files[:30]):  # TODO remove this
+            for idx, relative_url in enumerate(parquet_files[30:60]):  # TODO remove this
                 full_url = f"{BASE_URL}/{relative_url}"
                 unique_id = os.path.basename(relative_url).replace(".parquet", "")
                 try:
@@ -603,7 +602,14 @@ def cc_business_info_extraction_dag():
         try:
             table_name = "cc_table"
             logger.info(f"Loading {parquet_path} to {table_name}")
+
+            def clean_raw_text_body(df):
+                return df.withColumn(
+                    "raw_text_body", regexp_replace(col("raw_text_body"), "\u0000", "")
+                )
+
             df = spark.read.parquet(parquet_path)
+            df = clean_raw_text_body(df)
 
             df.write.format("jdbc").option("url", POSTGRES_JDBC_URL).option(
                 "dbtable", table_name
