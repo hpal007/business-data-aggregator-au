@@ -9,3 +9,6 @@ jars
 plugins/
 shared-data-volume/
 plugins
+cc_processed_data
+huggingface_cache
+shared-data-volume_copy

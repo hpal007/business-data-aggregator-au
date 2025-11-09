@@ -3,7 +3,12 @@ from datetime import datetime, timedelta
 from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField, StringType, LongType
 from pyspark.sql.window import Window
-from pyspark.sql.functions import row_number, monotonically_increasing_id, col
+from pyspark.sql.functions import (
+    row_number,
+    monotonically_increasing_id,
+    col,
+    regexp_replace,
+)
 import requests
 import json
 import re
@@ -127,7 +132,15 @@ def tester_dag_process_and_push_to_db():
 
         try:
             logger.info(f"Loading {parquet_path} to {table_name}")
+
+            def clean_raw_text_body(df):
+                return df.withColumn(
+                    "raw_text_body", regexp_replace(col("raw_text_body"), "\u0000", "")
+                )
+
             df = spark.read.parquet(parquet_path)
+
+            df = clean_raw_text_body(df)
 
             df.write.format("jdbc").option("url", POSTGRES_JDBC_URL).option(
                 "dbtable", table_name
@@ -160,14 +173,12 @@ def tester_dag_process_and_push_to_db():
         finally:
             spark.stop()
 
-
-    abr_path = os.path.join('/opt/shared-data/abr/', "abr_tbl")
+    abr_path = os.path.join("/opt/shared-data/abr/", "abr_tbl")
     merged_parquet = create_cc_table(OUTPUT_DIR)
     cc_table = load_cc_table(parquet_path=merged_parquet, table_name="cc_table")
     abr_table = load_abr_table(parquet_path=abr_path, table_name="abr_tbl")
 
-
-    merged_parquet >> cc_table  >> abr_table
+    merged_parquet >> cc_table >> abr_table
 
 
 dag_instance = tester_dag_process_and_push_to_db()

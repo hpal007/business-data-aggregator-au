@@ -411,10 +411,14 @@ def extract_business_info_from_soup(soup, error_info=None):
     }
     seen = {key: set() for key in results.keys()}
 
-    MAX_TEXT_NODES = 500
     MAX_RESULTS_PER_TYPE = 3
 
-    text_nodes = soup.find_all(string=True)[:MAX_TEXT_NODES]
+    # Only get text from footer and header
+    footer_header_elements = soup.find_all(["footer", "header"])
+    text_nodes = []
+
+    for element in footer_header_elements:
+        text_nodes.extend(element.find_all(string=True))
 
     for text_node in text_nodes:
         txt = text_node.strip()
@@ -477,12 +481,11 @@ def extract_json_fields(business_info_json_str):
         return None, None, None
     try:
         data = json.loads(business_info_json_str)
-        ABN = data["ABN"][0]["matched_text"] if data.get("ABN") else None
-        ACN = data["ACN"][0]["matched_text"] if data.get("ACN") else None
-        CompanyName = (
+        cc_abn = data["ABN"][0]["matched_text"] if data.get("ABN") else None
+        company_name = (
             data["CompanyName"][0]["matched_text"] if data.get("CompanyName") else None
         )
-        return ABN, ACN, CompanyName
+        return cc_abn, company_name
     except Exception:
         return None, None, None
 
@@ -491,6 +494,8 @@ def process_partition(iterator):
     """
     Process a partition of records with intelligent rate limiting.
     Each partition respects Common Crawl rate limits.
+
+    FIXED: Don't serialize BeautifulSoup objects - convert to string instead
     """
     for row in iterator:
         try:
@@ -504,7 +509,19 @@ def process_partition(iterator):
             soup, error_info = fetch_page_from_cc(record)
             info = extract_business_info_from_soup(soup, error_info)
             business_info = json.dumps(info, ensure_ascii=False)
-            ABN, ACN, CompanyName = extract_json_fields(business_info)
+            cc_abn, company_name = extract_json_fields(business_info)
+
+            # FIX: Extract only text content from body tag
+            # Remove all HTML tags and get clean text
+            raw_text_body = None
+            if soup:
+                body = soup.find("body")
+                if body:
+                    # Remove script and style tags first
+                    for script in body(["script", "style"]):
+                        script.decompose()
+                    # Get all text, join with spaces, and clean up
+                    raw_text_body = body.get_text(separator=" ", strip=True)
 
             yield (
                 row.url,
@@ -516,10 +533,10 @@ def process_partition(iterator):
                 row.warc_filename,
                 row.warc_record_offset,
                 row.warc_record_length,
-                ABN,
-                ACN,
-                CompanyName,
+                cc_abn,
+                company_name,
                 business_info,
+                raw_text_body,
             )
         except Exception as e:
             error_json = json.dumps(
@@ -541,6 +558,6 @@ def process_partition(iterator):
                 row.warc_record_length,
                 None,
                 None,
-                None,
                 error_json,
+                None,
             )
