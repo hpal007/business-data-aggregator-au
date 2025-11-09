@@ -9,3 +9,7 @@ psycopg2-binary
 duckdb
 warcio
 pyarrow
+cdx-toolkit
+beautifulsoup4
+transformers 
+torch

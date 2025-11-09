@@ -19,7 +19,7 @@ from utils.abr_spark import (
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-BASE_DIR = "/opt/shared-data"
+BASE_DIR = "/opt/shared-data/abr/"
 DATA_DIR = os.path.join(BASE_DIR, "abr_xml_data")
 PARQUET_DIR = os.path.join(BASE_DIR, "parquet_output")
 

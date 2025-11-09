@@ -13,36 +13,80 @@ from pathlib import Path
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import threading
+import time
+import random
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
-USER_AGENT = "cc-get-started/1.0 (Example data retrieval script; yourname@example.com)"
+# NEW: Better User-Agent for Common Crawl
+USER_AGENT = "Mozilla/5.0 (compatible; ArchiveBot/1.0; +https://www.commoncrawl.org/faq/#how-do-you-crawl)"
 
 # Thread-local storage for session (one per worker thread)
 _thread_local = threading.local()
 
+# NEW: Track request times to implement rate limiting
+_request_times = []
+_request_lock = threading.Lock()
+
+# NEW: Configuration for rate limiting
+MAX_REQUESTS_PER_SECOND = 13  # Limit to 2 requests per second per worker
+MIN_DELAY_BETWEEN_REQUESTS = 1.0 / MAX_REQUESTS_PER_SECOND  # 0.5 seconds
+
+
+def rate_limit_wait():
+    """
+    NEW: Implement rate limiting to avoid 403 errors from Common Crawl.
+    Ensures we don't exceed MAX_REQUESTS_PER_SECOND
+    """
+    global _request_times
+
+    with _request_lock:
+        current_time = time.time()
+
+        # Remove old request times (older than 1 second)
+        _request_times = [t for t in _request_times if current_time - t < 1.0]
+
+        # If we've exceeded the limit, wait
+        if len(_request_times) >= MAX_REQUESTS_PER_SECOND:
+            sleep_time = 1.0 - (current_time - _request_times[0])
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+        # Record this request
+        _request_times.append(time.time())
+
 
 def get_session():
     """
-    Get or create a requests session with connection pooling.
-    OPTIMIZED: Improved connection pooling and retry strategy
+    Get or create a requests session with connection pooling and smart retry strategy.
+    OPTIMIZED: Better retry strategy for Common Crawl rate limiting
     """
     if not hasattr(_thread_local, "session"):
         session = requests.Session()
 
-        # CHANGED: More aggressive retry strategy - fail fast
+        # NEW: Custom retry strategy that handles 403 errors
         retry_strategy = Retry(
-            total=1,  # CHANGED: Reduced from 2 to 1 (fail fast)
-            backoff_factor=0.3,  # CHANGED: Reduced from 0.5 to 0.3
-            status_forcelist=[429, 503, 504],  # CHANGED: Removed 500, 502 (transient errors)
+            total=5,  # CHANGED: Increased from 1 to 5 retries for 403 errors
+            backoff_factor=2,  # CHANGED: Exponential backoff with factor of 2 (1, 2, 4, 8, 16 seconds)
+            status_forcelist=[
+                429,
+                403,
+                503,
+                504,
+            ],  # CHANGED: Added 403 to retryable status codes
+            allowed_methods=["GET"],  # Only retry GET requests
         )
         adapter = HTTPAdapter(
-            max_retries=retry_strategy, 
-            pool_connections=20,  # CHANGED: Increased from 10
-            pool_maxsize=20  # CHANGED: Increased from 10
+            max_retries=retry_strategy,
+            pool_connections=10,  # CHANGED: Reduced from 20 to 5 (less aggressive)
+            pool_maxsize=10,  # CHANGED: Reduced from 20 to 5 (less aggressive)
         )
         session.mount("http://", adapter)
         session.mount("https://", adapter)
+
+        # NEW: Set better timeout
+        session.timeout = 10
+
         _thread_local.session = session
 
     return _thread_local.session
@@ -107,8 +151,8 @@ IGNORED_PARENT_TAGS = {"script", "style", "noscript", "meta", "link"}
 
 def fetch_page_from_cc(record, myagent=USER_AGENT):
     """
-    Fetch page from Common Crawl with connection pooling and optimized timeout.
-    OPTIMIZED: More aggressive timeout, better error handling
+    Fetch page from Common Crawl with intelligent rate limiting and backoff.
+    OPTIMIZED: Handles 403 rate limiting with exponential backoff
     Returns tuple: (soup, error_info)
     """
     error_info = {"status": "success", "error": None}
@@ -121,38 +165,76 @@ def fetch_page_from_cc(record, myagent=USER_AGENT):
 
         byte_range = f"bytes={offset}-{offset + length - 1}"
 
+        # NEW: Apply rate limiting before making request
+        rate_limit_wait()
+
         # Use connection pooling session
         session = get_session()
 
-        # Make request with optimized timeout
-        try:
-            # CHANGED: Reduced timeout from 10s to 8s (fail fast on slow servers)
-            response = session.get(
-                s3_url,
-                headers={"user-agent": myagent, "Range": byte_range},
-                stream=True,
-                timeout=8,  # Aggressive timeout
-            )
-        except requests.exceptions.Timeout:
-            error_info["status"] = "timeout"
-            error_info["error"] = "Request timed out"
-            return None, error_info
-        except requests.exceptions.ConnectionError:
-            error_info["status"] = "connection_error"
-            error_info["error"] = "Connection failed"
-            return None, error_info
-        except requests.exceptions.RequestException as e:
-            error_info["status"] = "request_error"
-            error_info["error"] = str(e)[:50]
-            return None, error_info
+        # Make request with exponential backoff on failure
+        attempt = 0
+        max_attempts = 5
+
+        while attempt < max_attempts:
+            try:
+                response = session.get(
+                    s3_url,
+                    headers={
+                        "user-agent": myagent,
+                        "Range": byte_range,
+                        "Accept": "*/*",  # NEW: Better headers for Common Crawl
+                    },
+                    stream=True,
+                    timeout=15,  # CHANGED: Increased from 6 to 15 seconds
+                    allow_redirects=True,  # NEW: Allow redirects
+                )
+                break  # Success, exit retry loop
+
+            except requests.exceptions.Timeout:
+                attempt += 1
+                if attempt >= max_attempts:
+                    error_info["status"] = "timeout"
+                    error_info["error"] = (
+                        f"Request timed out after {max_attempts} attempts"
+                    )
+                    return None, error_info
+                # Exponential backoff before retry
+                wait_time = 2**attempt
+                time.sleep(wait_time)
+
+            except requests.exceptions.ConnectionError:
+                attempt += 1
+                if attempt >= max_attempts:
+                    error_info["status"] = "connection_error"
+                    error_info["error"] = "Connection failed"
+                    return None, error_info
+                wait_time = 2**attempt
+                time.sleep(wait_time)
+
+            except requests.exceptions.RequestException as e:
+                attempt += 1
+                if attempt >= max_attempts:
+                    error_info["status"] = "request_error"
+                    error_info["error"] = str(e)[:50]
+                    return None, error_info
+                wait_time = 2**attempt
+                time.sleep(wait_time)
 
         # Check response status
-        if response.status_code != 206:
+        if response.status_code == 403:
+            error_info["status"] = "rate_limited"
+            error_info["error"] = "Rate limited by Common Crawl (403)"
+            return None, error_info
+        elif response.status_code == 404:
+            error_info["status"] = "not_found"
+            error_info["error"] = "WARC record not found"
+            return None, error_info
+        elif response.status_code != 206:
             error_info["status"] = "invalid_status"
             error_info["error"] = f"Status {response.status_code}"
             return None, error_info
 
-        # Parse WARC record with optimized reading
+        # Parse WARC record
         try:
             stream = ArchiveIterator(response.raw)
             for warc_record in stream:
@@ -164,16 +246,13 @@ def fetch_page_from_cc(record, myagent=USER_AGENT):
                         error_info["error"] = "No content"
                         return None, error_info
 
-                    # Faster decode with error ignoring
                     html_text = html_bytes.decode("utf-8", errors="ignore")
 
-                    # Quick check before parsing
                     if len(html_text) < 50:
                         error_info["status"] = "empty_html"
                         error_info["error"] = "Content too short"
                         return None, error_info
 
-                    # Use html.parser instead of lxml for speed
                     soup = BeautifulSoup(html_text, "html.parser")
                     return soup, error_info
 
@@ -312,10 +391,7 @@ def is_likely_address(text):
 
 
 def extract_business_info_from_soup(soup, error_info=None):
-    """
-    Optimized extraction with early exit.
-    OPTIMIZED: Added limits to prevent excessive processing
-    """
+    """Optimized extraction with early exit"""
     if soup is None:
         if error_info:
             return {
@@ -335,10 +411,9 @@ def extract_business_info_from_soup(soup, error_info=None):
     }
     seen = {key: set() for key in results.keys()}
 
-    # CHANGED: Extract text nodes with limits
-    MAX_TEXT_NODES = 500  # NEW: Limit text nodes to process
-    MAX_RESULTS_PER_TYPE = 3  # NEW: Stop after finding 3 of each type
-    
+    MAX_TEXT_NODES = 500
+    MAX_RESULTS_PER_TYPE = 3
+
     text_nodes = soup.find_all(string=True)[:MAX_TEXT_NODES]
 
     for text_node in text_nodes:
@@ -350,11 +425,13 @@ def extract_business_info_from_soup(soup, error_info=None):
         if parent and parent.name and parent.name.lower() in IGNORED_PARENT_TAGS:
             continue
 
-        # CHANGED: Early exit if we have enough of each type
-        if all(len(results[k]) >= MAX_RESULTS_PER_TYPE for k in results.keys() if k != "fetch_status"):
+        if all(
+            len(results[k]) >= MAX_RESULTS_PER_TYPE
+            for k in results.keys()
+            if k != "fetch_status"
+        ):
             break
 
-        # Fast regex matching
         for m in ABN_RE.finditer(txt):
             normalized = normalize_abn_acn(m.group(1))
             if len(normalized) == 11 and normalized not in seen["ABN"]:
@@ -412,8 +489,8 @@ def extract_json_fields(business_info_json_str):
 
 def process_partition(iterator):
     """
-    Process a partition of records with connection pooling.
-    This function is called in parallel across multiple partitions.
+    Process a partition of records with intelligent rate limiting.
+    Each partition respects Common Crawl rate limits.
     """
     for row in iterator:
         try:
