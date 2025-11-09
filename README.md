@@ -96,9 +96,11 @@ The data pipeline is orchestrated using Apache Airflow and consists of three mai
 -   **PostgreSQL**: Used as the target database to store the processed data.
 -   **requests**: Used to download files from the internet.
 -   **BeautifulSoup**: Used for parsing HTML and XML content to extract business information from the Common Crawl data.
+-   **FastAPI**: FastAPI is not used in this project.
+-   **PyArrow**: Used for efficient handling of Parquet files, especially during splitting and processing of Common Crawl data.
 
 
-## AI Model Used & Rationale
+## AI Model Used & Rationale - TODO
 
 The project uses two pre-trained models from the Hugging Face `transformers` library for NLP tasks:
 
