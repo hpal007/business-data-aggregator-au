@@ -507,7 +507,7 @@ def cc_business_info_extraction_dag():
             spark.stop()
 
     @task
-    def load_table(parquet_path):
+    def load_table(parquet_path):  # TODO - ADD table schema
         """Load merged parquet data to PostgreSQL"""
         if checkpoint_manager.is_task_completed("load_table"):
             logger.info("⏭️  Skipping load_table - already completed")

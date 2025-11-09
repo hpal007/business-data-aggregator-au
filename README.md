@@ -40,8 +40,8 @@ CREATE TABLE abr_table (
 
 ### `cc_table`
 
-This table stores data extracted from the Common Crawl web archive.
-
+This table stores data extracted from the Common Crawl web archive. 
+TODO - need to change from infer
 **DDL:**
 ```sql
 CREATE TABLE cc_table (
@@ -54,7 +54,7 @@ CREATE TABLE cc_table (
     warc_filename VARCHAR(255),
     warc_record_offset BIGINT,
     warc_record_length BIGINT,
-    cc_abn VARCHAR(255),
+    cc_abn VARCHAR(255),  -- BIGINT
     company_name VARCHAR(255),
     business_info TEXT,
     raw_text_body TEXT
