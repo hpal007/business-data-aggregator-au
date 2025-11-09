@@ -1,38 +1,21 @@
 import requests
 from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType, StructField, StringType
 import os
 import zipfile
-import logging
+
 from airflow.decorators import dag, task
 from datetime import datetime
 import time
 import xml.etree.ElementTree as ET
-
+from utils import POSTGRES_JDBC_URL, POSTGRES_PROPERTIES, URLS, ABR_SCHEMA, logger
 
 from pyspark.sql.types import LongType
 from pyspark.sql.functions import to_date, year, month, coalesce, lit
 
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-logger = logging.getLogger(__name__)
-
 BASE_DIR = "/opt/shared-data/abr/"
 DATA_DIR = os.path.join(BASE_DIR, "abr_xml_data")
 PARQUET_DIR = os.path.join(BASE_DIR, "parquet_output")
-
-POSTGRES_JDBC_URL = "jdbc:postgresql://target_postgres:5432/target_db"
-POSTGRES_PROPERTIES = {
-    "user": "spark_user",
-    "password": "spark_pass",
-    "driver": "org.postgresql.Driver",
-}
-
-# https://data.gov.au/data/dataset/activity/abn-bulk-extract
-URLS = [
-    "https://data.gov.au/data/dataset/5bd7fcab-e315-42cb-8daf-50b7efc2027e/resource/0ae4d427-6fa8-4d40-8e76-c6909b5a071b/download/public_split_1_10.zip",
-    "https://data.gov.au/data/dataset/5bd7fcab-e315-42cb-8daf-50b7efc2027e/resource/635fcb95-7864-4509-9fa7-a62a6e32b62d/download/public_split_11_20.zip",
-]
 
 
 spark = spark = (
@@ -42,19 +25,6 @@ spark = spark = (
     .config("spark.driver.maxResultSize", "512m")
     .config("spark.jars.packages", "org.postgresql:postgresql:42.6.0")
     .getOrCreate()
-)
-
-ABR_SCHEMA = StructType(
-    [
-        StructField("abn", StringType(), True),
-        StructField("abn_status", StringType(), True),
-        StructField("abn_start_date", StringType(), True),
-        StructField("entity_type", StringType(), True),
-        StructField("entity_type_text", StringType(), True),
-        StructField("entity_name", StringType(), True),
-        StructField("entity_state", StringType(), True),
-        StructField("entity_postcode", StringType(), True),
-    ]
 )
 
 

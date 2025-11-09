@@ -9,7 +9,6 @@ from pyspark.sql.functions import (
 import requests
 import json
 import os
-import logging
 import gzip
 from pathlib import Path
 import duckdb
@@ -19,13 +18,16 @@ from job_business_extract import process_partition
 import gc
 import time
 import shutil
+from utils import (
+    logger,
+    POSTGRES_JDBC_URL,
+    POSTGRES_PROPERTIES,
+    INDEX_NAME,
+    BASE_URL,
+    CheckpointManager,
+)
 
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-logger = logging.getLogger(__name__)
-
-INDEX_NAME = "CC-MAIN-2025-13"
-BASE_URL = "https://data.commoncrawl.org"
 BASE_DIR = "/opt/shared-data/cc/"
 OUTPUT_DIR = Path(os.path.join(BASE_DIR, "cc_processed_data"))
 SPLIT_DIR = Path(os.path.join(BASE_DIR, "cc_split_data"))
@@ -33,95 +35,9 @@ DATA_DIR = os.path.join(BASE_DIR, "cc_index_data")
 CHECKPOINT_DIR = os.path.join(BASE_DIR, "checkpoints")
 CHECKPOINT_FILE = os.path.join(CHECKPOINT_DIR, f"dag_checkpoint_{INDEX_NAME}.json")
 
-POSTGRES_JDBC_URL = "jdbc:postgresql://target_postgres:5432/target_db"
-POSTGRES_PROPERTIES = {
-    "user": "spark_user",
-    "password": "spark_pass",
-    "driver": "org.postgresql.Driver",
-}
 
 # === Configuration ===
 BATCH_SIZE = 500  # Process records at a time, set to None for all records
-
-
-class CheckpointManager:
-    """Manages checkpoint state for DAG tasks."""
-
-    def __init__(self, checkpoint_file, index_name):
-        self.checkpoint_file = checkpoint_file
-        self.index_name = index_name
-        self.state = self._load_checkpoint()
-
-    def _load_checkpoint(self):
-        """Load checkpoint state from file."""
-        if os.path.exists(self.checkpoint_file):
-            try:
-                with open(self.checkpoint_file, "r") as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.warning(f"Could not load checkpoint: {e}. Starting fresh.")
-                return {
-                    "index_name": self.index_name,
-                    "tasks": {},
-                    "created_at": datetime.now().isoformat(),
-                }
-        return {
-            "index_name": self.index_name,
-            "tasks": {},
-            "created_at": datetime.now().isoformat(),
-        }
-
-    def _save_checkpoint(self):
-        """Save checkpoint state to file."""
-        os.makedirs(os.path.dirname(self.checkpoint_file), exist_ok=True)
-        with open(self.checkpoint_file, "w") as f:
-            json.dump(self.state, f, indent=2)
-        logger.info(f"Checkpoint saved: {self.checkpoint_file}")
-
-    def is_task_completed(self, task_name):
-        """Check if a task has been completed."""
-        return (
-            self.state.get("tasks", {}).get(task_name, {}).get("status") == "completed"
-        )
-
-    def mark_task_completed(self, task_name, metadata=None):
-        """Mark a task as completed."""
-        if "tasks" not in self.state:
-            self.state["tasks"] = {}
-        self.state["tasks"][task_name] = {
-            "status": "completed",
-            "completed_at": datetime.now().isoformat(),
-            "metadata": metadata or {},
-        }
-        self._save_checkpoint()
-        logger.info(f"✅ Task '{task_name}' marked as completed")
-
-    def mark_task_failed(self, task_name, error_msg=None):
-        """Mark a task as failed."""
-        if "tasks" not in self.state:
-            self.state["tasks"] = {}
-        self.state["tasks"][task_name] = {
-            "status": "failed",
-            "failed_at": datetime.now().isoformat(),
-            "error": error_msg,
-        }
-        self._save_checkpoint()
-        logger.warning(f"❌ Task '{task_name}' marked as failed")
-
-    def get_task_metadata(self, task_name):
-        """Get metadata for a completed task."""
-        return self.state.get("tasks", {}).get(task_name, {}).get("metadata", {})
-
-    def reset_checkpoint(self):
-        """Reset checkpoint for a fresh start."""
-        self.state = {
-            "index_name": self.index_name,
-            "tasks": {},
-            "created_at": datetime.now().isoformat(),
-        }
-        self._save_checkpoint()
-        logger.info("✅ Checkpoint reset")
-
 
 checkpoint_manager = CheckpointManager(CHECKPOINT_FILE, INDEX_NAME)
 
@@ -137,9 +53,7 @@ def get_spark_session(app_name: str = "cc"):
         .config("spark.driver.cores", "8")
         .config("spark.executor.memory", "7g")
         .config("spark.executor.cores", "8")
-        .config(
-            "spark.sql.shuffle.partitions", "64"
-        )  # CHANGED: Increased from 56 to 64
+        .config("spark.sql.shuffle.partitions", "64")
         .config("spark.driver.maxResultSize", "3g")
         .config("spark.submit.pyFiles", "/opt/airflow/dags/job_business_extract.py")
         # .config("spark.jars.packages", "org.postgresql:postgresql:42.6.0")
@@ -245,7 +159,9 @@ def cc_business_info_extraction_dag():
             processed_count = 0
             failed_count = 0
 
-            for idx, relative_url in enumerate(parquet_files[30:60]):  # TODO remove this
+            for idx, relative_url in enumerate(
+                parquet_files[30:60]
+            ):  # TODO remove this
                 full_url = f"{BASE_URL}/{relative_url}"
                 unique_id = os.path.basename(relative_url).replace(".parquet", "")
                 try:
