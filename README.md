@@ -100,7 +100,7 @@ The data pipeline is orchestrated using Apache Airflow and consists of three mai
 -   **PyArrow**: Used for efficient handling of Parquet files, especially during splitting and processing of Common Crawl data.
 
 
-## AI Model Used & Rationale - TODO
+## AI Model Used & Rationale - TODO (in-progress)
 
 The project uses two pre-trained models from the Hugging Face `transformers` library for NLP tasks:
 

@@ -3,27 +3,25 @@ from pyspark.sql import SparkSession
 import os
 import zipfile
 
-from airflow.decorators import dag, task
+from airflow.sdk import dag, task
 from datetime import datetime
 import time
 import xml.etree.ElementTree as ET
 from utils import POSTGRES_JDBC_URL, POSTGRES_PROPERTIES, URLS, ABR_SCHEMA, logger
-
-from pyspark.sql.types import LongType
-from pyspark.sql.functions import to_date, year, month, coalesce, lit
+from job_abr import process_abr_parquet_to_table
 
 
 BASE_DIR = "/opt/shared-data/abr/"
 DATA_DIR = os.path.join(BASE_DIR, "abr_xml_data")
 PARQUET_DIR = os.path.join(BASE_DIR, "parquet_output")
 
-
 spark = spark = (
     SparkSession.builder.appName("CCBusinessInfoExtraction")
-    .config("spark.driver.memory", "1g")
+    .config("spark.driver.memory", "4g")
     .config("spark.sql.shuffle.partitions", "4")
-    .config("spark.driver.maxResultSize", "512m")
-    .config("spark.jars.packages", "org.postgresql:postgresql:42.6.0")
+    .config("spark.driver.maxResultSize", "1g")
+    .config("spark.jars", "/opt/spark/jars/postgresql-42.6.0.jar")
+    .config("spark.submit.pyFiles", "/opt/airflow/dags/job_abr.py")
     .getOrCreate()
 )
 
@@ -101,7 +99,7 @@ def download_and_unzip_dag():
 
     @task
     def process_xml_to_parquet():
-        batch_size = 100000
+        batch_size = 10000
         # Ensure output dir exists
         os.makedirs(PARQUET_DIR, exist_ok=True)
 
@@ -114,22 +112,23 @@ def download_and_unzip_dag():
             logger.info(f"Processing: {file_path}")
             start_time = time.time()
 
-            df = spark.createDataFrame([], schema=ABR_SCHEMA)
-            batch_num = 0
-            logger.info("Processing batch with batch_size of", batch_size)
-            for batch in parse_abn_xml_iterative(file_path, batch_size=batch_size):
-                batch_df = spark.createDataFrame(batch, schema=ABR_SCHEMA)
-                df = df.union(batch_df)
-                batch_num += 1
-
-                logger.info(f"{batch_num} ->", end=" ")
-
-            count = df.count()
-            logger.info(f"Total records in {xml_file}: {count}")
             parquet_path = os.path.join(
                 PARQUET_DIR, f"{xml_file.replace('.xml', '.parquet')}"
             )
-            df.write.mode("overwrite").parquet(parquet_path)
+
+            batch_num = 0
+            first_batch = True
+            logger.info("Processing batch with batch_size of", batch_size)
+
+            for batch in parse_abn_xml_iterative(file_path, batch_size=batch_size):
+                batch_df = spark.createDataFrame(batch, schema=ABR_SCHEMA)
+
+                mode = "overwrite" if first_batch else "append"
+                batch_df.write.mode(mode).parquet(parquet_path)
+                first_batch = False
+
+                batch_num += 1
+                print(f"{batch_num} ->", end=" ")
 
             logger.info(f"Saved → {parquet_path}")
             logger.info(f"Time taken: {time.time() - start_time:.2f}s")
@@ -138,27 +137,10 @@ def download_and_unzip_dag():
 
     @task
     def process_parquet_to_table():
-        # Read parquet files
-        df = spark.read.schema(ABR_SCHEMA).parquet(f"{PARQUET_DIR}/*.parquet")
-
-        # Process the data using the imported function
-        active_df = (
-            df.filter(df["abn_status"] == "ACT")
-            .withColumn("abn_start_date", to_date("abn_start_date", "yyyyMMdd"))
-            .withColumn("year", year("abn_start_date"))
-            .withColumn("month", month("abn_start_date"))
-            .withColumn("abn", df["abn"].cast(LongType()))
-            .withColumn("entity_state", coalesce("entity_state", lit("unknown")))
-            .orderBy("abn", "entity_name", "entity_state")
+        output_path = process_abr_parquet_to_table(
+            spark, PARQUET_DIR, BASE_DIR, ABR_SCHEMA
         )
-        # Write the processed data
-        output_path = os.path.join(BASE_DIR, "abr_tbl")
-        active_df.write.partitionBy("year", "entity_state").mode("overwrite").parquet(
-            output_path
-        )
-
         logger.info("✅ Parquet files processed and partitioned successfully")
-
         return output_path
 
     @task

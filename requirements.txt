@@ -11,5 +11,8 @@ warcio
 pyarrow
 cdx-toolkit
 beautifulsoup4
-transformers 
+fuzzywuzzy
+spacy
+python-Levenshtein
+transformers
 torch

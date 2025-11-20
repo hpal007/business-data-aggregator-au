@@ -348,7 +348,9 @@ def cc_business_info_extraction_dag():
                 StructField("warc_record_length", LongType(), True),
                 StructField("cc_abn", StringType(), True),
                 StructField("company_name", StringType(), True),
+                # StructField("site_name", StringType(), True),
                 StructField("business_info", StringType(), True),
+                StructField("meta_info", StringType(), True),
                 StructField("raw_text_body", StringType(), True),
             ]
         )

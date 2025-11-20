@@ -9,6 +9,15 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import threading
 import time
+import spacy
+
+# Load Spacy model
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    # Fallback if model is not found (e.g., during build)
+    print("Spacy model 'en_core_web_sm' not found. NLP features will be disabled.")
+    nlp = None
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
@@ -139,6 +148,38 @@ ADDRESS_MARKERS = re.compile(
 
 POSTCODE_RE = re.compile(r"\b\d{4}\b")
 IGNORED_PARENT_TAGS = {"script", "style", "noscript", "meta", "link"}
+
+
+AUSTRALIAN_SUFFIXES = [
+    r"\s+PTY\s+LTD\b",
+    r"\s+P\.\s*L\.\s*LTD\b",
+    r"\s+LIMITED\b",
+    r"\s+LTD\b",
+    r"\s+CO\b",
+    r"\s+CORP\b",
+    r"\s+INC\b",
+    r"\s+LLC\b",
+    r"\s+COMPANY\b",
+    r"\s+THE\b",
+    r"\s+OF\b",
+]
+STOP_WORDS = ["the", "a", "and", "co"]
+
+
+def clean_name(name):
+    # 1. Lowercase
+    name = str(name).lower()
+    # 2. Remove punctuation (keep spaces)
+    name = re.sub(r"[^\w\s]", "", name)
+    # 3. Strip legal suffixes
+    for suffix in AUSTRALIAN_SUFFIXES:
+        name = re.sub(suffix, "", name, flags=re.IGNORECASE).strip()
+    # 4. Remove stop words and multiple spaces
+    name_tokens = [word for word in name.split() if word not in STOP_WORDS]
+    # 5. Remove "australia" if it's at the end
+    cleaned = " ".join(name_tokens)
+    cleaned = re.sub(r"\baustralia\b", "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned
 
 
 def fetch_page_from_cc(record, myagent=USER_AGENT):
@@ -333,16 +374,64 @@ def is_likely_company_name(text, parent_tag):
         "terms and conditions",
         "privacy policy",
         "copyright",
+        "all rights reserved",
+        "main header",
+        "container",
+        "wordpress",
+        "theme",
+        "custodians",
+        "journalistic ethics",
+        "po box",
+        "street",
+        "road",
+        "avenue",
+        "drive",
+        "lane",
+        "place",
+        "court",
+        "level",
+        "building",
+        "suite",
+        "unit",
+        "reply paid",
     ]
 
     text_lower = text.lower()
+
+    # Check for blacklisted keywords
     if any(kw in text_lower for kw in false_positive_keywords):
+        return False
+
+    # Check for address patterns (digits followed by address markers)
+    if re.search(
+        r"\d+\s+(st|street|rd|road|ave|avenue|dr|drive|ln|lane|pl|place|ct|court)\b",
+        text_lower,
+    ):
+        return False
+
+    # Check for PO Box
+    if "po box" in text_lower or "p.o. box" in text_lower:
         return False
 
     if parent_tag and parent_tag.name in {"a", "button", "nav", "footer", "header"}:
         return False
 
     return True
+
+
+def extract_entities_spacy(text):
+    """Extract ORG entities using Spacy"""
+    if not nlp or not text:
+        return []
+
+    doc = nlp(text[:100000])  # Limit text length for performance
+    orgs = set()
+    for ent in doc.ents:
+        if ent.label_ == "ORG":
+            clean_org = ent.text.strip()
+            if len(clean_org) > 3 and len(clean_org) < 100:
+                orgs.add(clean_org)
+    return list(orgs)
 
 
 def is_likely_address(text):
@@ -458,7 +547,62 @@ def extract_business_info_from_soup(soup, error_info=None):
                 seen["CompanyName"].add(company)
                 results["CompanyName"].append({"matched_text": company})
 
+    # NEW: NLP Extraction if regex failed to find enough companies
+    if len(results["CompanyName"]) < MAX_RESULTS_PER_TYPE:
+        # Aggregate text for NLP
+        full_text = " ".join([t.strip() for t in text_nodes if len(t.strip()) > 20])
+        spacy_orgs = extract_entities_spacy(full_text)
+
+        for org in spacy_orgs:
+            if len(results["CompanyName"]) >= MAX_RESULTS_PER_TYPE:
+                break
+            if (
+                is_likely_company_name(org, None)
+                and org not in seen["CompanyName"]
+                and not any(
+                    existing in org for existing in seen["CompanyName"]
+                )  # Avoid duplicates/substrings
+            ):
+                seen["CompanyName"].add(org)
+                results["CompanyName"].append({"matched_text": org, "method": "nlp"})
+
     return results
+
+
+def extract_meta_info(soup):
+    """Extract potential company names from meta tags"""
+    if not soup:
+        return {}
+
+    meta_tags = soup.find_all("meta")
+    meta_info = {}
+
+    # specific tags to look for
+    target_properties = {
+        "og:site_name": "site_name",
+        "application-name": "app_name",
+        "apple-mobile-web-app-title": "app_title",
+        "og:title": "og_title",
+        "twitter:title": "twitter_title",
+        "title": "meta_title",  # sometimes title is in meta name="title"
+    }
+
+    for tag in meta_tags:
+        # Check property or name attribute
+        key = tag.get("property") or tag.get("name")
+        content = tag.get("content")
+
+        if key and content:
+            key = key.lower()
+            for target, internal_key in target_properties.items():
+                if target in key:
+                    meta_info[internal_key] = content.strip()
+
+    # Also get the <title> tag
+    if soup.title and soup.title.string:
+        meta_info["html_title"] = soup.title.string.strip()
+
+    return meta_info
 
 
 def extract_json_fields(business_info_json_str):
@@ -467,12 +611,42 @@ def extract_json_fields(business_info_json_str):
     try:
         data = json.loads(business_info_json_str)
         cc_abn = data["ABN"][0]["matched_text"] if data.get("ABN") else None
+        # We still extract this but might override it
         company_name = (
             data["CompanyName"][0]["matched_text"] if data.get("CompanyName") else None
         )
         return cc_abn, company_name
     except Exception:
         return None, None, None
+
+
+def clean_title_string(text):
+    """Clean common suffixes from title strings"""
+    if not text:
+        return None
+
+    # Common separators
+    separators = [" | ", " - ", " : ", " • ", " – "]
+
+    # If separator exists, usually the brand is the first part OR the last part
+    # Heuristic: Brand is usually shorter.
+    # But for "Home | Brand", Brand is last.
+    # For "Brand - Slogan", Brand is first.
+
+    # Let's try to split and see.
+    # For now, let's just take the first part if it looks like a name,
+    # unless it's "Home", "Welcome", etc.
+
+    for sep in separators:
+        if sep in text:
+            parts = text.split(sep)
+            # If first part is generic, take last
+            if parts[0].lower().strip() in ["home", "welcome", "index", "main"]:
+                return parts[-1].strip()
+            # Otherwise take first
+            return parts[0].strip()
+
+    return text
 
 
 def process_partition(iterator):
@@ -492,9 +666,41 @@ def process_partition(iterator):
             }
 
             soup, error_info = fetch_page_from_cc(record)
+
+            # 1. Extract Meta Info (High Priority)
+            meta_info = extract_meta_info(soup=soup)
+
+            # 2. Extract Body/Footer Info (Fallback/Supplement)
             info = extract_business_info_from_soup(soup, error_info)
             business_info = json.dumps(info, ensure_ascii=False)
-            cc_abn, company_name = extract_json_fields(business_info)
+
+            cc_abn, extracted_company_name = extract_json_fields(business_info)
+
+            # 3. Determine Best Company Name
+            final_company_name = None
+
+            # Priority 1: og:site_name
+            if meta_info.get("site_name"):
+                final_company_name = meta_info["site_name"]
+            # Priority 2: application-name
+            elif meta_info.get("app_name"):
+                final_company_name = meta_info["app_name"]
+            # Priority 3: Extracted from text (if high confidence/NLP)
+            elif extracted_company_name:
+                final_company_name = extracted_company_name
+            # Priority 4: HTML Title (cleaned) - risky but better than nothing?
+            # Maybe too risky. Let's stick to the above.
+
+            # Clean the final name
+            if final_company_name:
+                final_company_name = clean_name(final_company_name)
+                # Final check if it became empty or invalid
+                if not is_likely_company_name(final_company_name, None):
+                    final_company_name = None
+
+            # Fallback if cleaning killed it
+            if not final_company_name and extracted_company_name:
+                final_company_name = clean_name(extracted_company_name)
 
             raw_text_body = None
             if soup:
@@ -533,8 +739,10 @@ def process_partition(iterator):
                 row.warc_record_offset,
                 row.warc_record_length,
                 cc_abn,
-                company_name,
+                final_company_name,  # Use the prioritized name
+                # meta_info.get("site_name"),  # Keep site_name column if needed
                 business_info,
+                json.dumps(meta_info, ensure_ascii=False),  # Store full meta info
                 raw_text_body,
             )
         except Exception as e:
@@ -557,6 +765,8 @@ def process_partition(iterator):
                 row.warc_record_length,
                 None,
                 None,
+                # None,
                 error_json,
+                None,
                 None,
             )

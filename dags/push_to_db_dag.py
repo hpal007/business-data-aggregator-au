@@ -115,8 +115,12 @@ def tester_dag_process_and_push_to_db():
                     "raw_text_body", regexp_replace(col("raw_text_body"), "\u0000", "")
                 )
 
+            def cast_cc_abn_to_bigint(df):
+                return df.withColumn("cc_abn", col("cc_abn").cast("long"))
+
             df = spark.read.parquet(parquet_path)
             df = clean_raw_text_body(df)
+            df = cast_cc_abn_to_bigint(df)
 
             df.write.format("jdbc").option("url", POSTGRES_JDBC_URL).option(
                 "dbtable", table_name
@@ -149,12 +153,21 @@ def tester_dag_process_and_push_to_db():
         finally:
             spark.stop()
 
+    @task
+    def run_matching():
+        """Run the fuzzy matching job"""
+        from job_matching import run_matching_job
+
+        run_matching_job()
+        return "Matching job completed"
+
     abr_path = os.path.join("/opt/shared-data/abr/", "abr_tbl")
     merged_parquet = create_cc_table(OUTPUT_DIR)
     cc_table = load_cc_table(parquet_path=merged_parquet, table_name="cc_table")
     abr_table = load_abr_table(parquet_path=abr_path, table_name="abr_table")
+    matching_task = run_matching()
 
-    merged_parquet >> cc_table >> abr_table
+    merged_parquet >> cc_table >> abr_table >> matching_task
 
 
 dag_instance = tester_dag_process_and_push_to_db()

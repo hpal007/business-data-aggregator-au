@@ -33,7 +33,8 @@ RUN chown airflow: /opt/airflow/requirements.txt || true
 USER airflow
 
 # Install Python dependencies from requirements.txt
-RUN pip install --no-cache-dir -r /opt/airflow/requirements.txt
+RUN pip install --no-cache-dir -r /opt/airflow/requirements.txt && \
+    python -m spacy download en_core_web_sm
 
 # Prepare Spark apps folder
 USER root
